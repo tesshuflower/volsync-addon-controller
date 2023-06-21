@@ -9,6 +9,7 @@ import (
 	"github.com/stolostron/volsync-addon-controller/controllers"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
 	"k8s.io/apimachinery/pkg/types"
@@ -21,9 +22,13 @@ import (
 	workv1 "open-cluster-management.io/api/work/v1"
 
 	operatorsv1alpha1 "github.com/operator-framework/api/pkg/operators/v1alpha1"
+
+	volsyncaddonv1alpha1 "github.com/stolostron/volsync-addon-controller/api/v1alpha1"
 )
 
 var _ = Describe("Addoncontroller", func() {
+	logger := zap.New(zap.UseDevMode(true), zap.WriteTo(GinkgoWriter))
+
 	genericCodecs := serializer.NewCodecFactory(scheme.Scheme)
 	genericCodec := genericCodecs.UniversalDeserializer()
 
@@ -47,6 +52,12 @@ var _ = Describe("Addoncontroller", func() {
 						ConfigGroupResource: addonv1alpha1.ConfigGroupResource{
 							Group:    "addon.open-cluster-management.io",
 							Resource: "addondeploymentconfigs",
+						},
+					},
+					{
+						ConfigGroupResource: addonv1alpha1.ConfigGroupResource{
+							Group:    "addon.open-cluster-management.io",
+							Resource: "volsyncaddonconfigs",
 						},
 					},
 				},
@@ -376,7 +387,7 @@ var _ = Describe("Addoncontroller", func() {
 		})
 
 		Describe("Node Selector/Tolerations tests", func() {
-			Context("When a ManagedClusterAddOn is created with node selectors and tolerations", func() {
+			Context("When a ManagedClusterAddOn is created", func() {
 				var mcAddon *addonv1alpha1.ManagedClusterAddOn
 				var manifestWork *workv1.ManifestWork
 				var operatorSubscription *operatorsv1alpha1.Subscription
@@ -465,7 +476,7 @@ var _ = Describe("Addoncontroller", func() {
 									return err
 								}
 
-								// Update the managedclusteraddon - doing this in finally to avoid update issues if
+								// Update the managedclusteraddon - doing this in eventually loop to avoid update issues if
 								// the controller is also updating the resource
 								mcAddon.Spec.Configs = []addonv1alpha1.AddOnConfig{
 									{
@@ -648,6 +659,257 @@ var _ = Describe("Addoncontroller", func() {
 						Expect(operatorSubscription.Spec.Config.NodeSelector).To(Equal(nodePlacement.NodeSelector))
 						Expect(operatorSubscription.Spec.Config.Tolerations).To(Equal(nodePlacement.Tolerations))
 					})
+
+					Context("When a VolSyncAddOnConfig is also used with a cpuLimit", func() {
+						cpuLimit, err := resource.ParseQuantity("500m")
+						Expect(err).NotTo(HaveOccurred())
+
+						volSyncAddOnConfig := &volsyncaddonv1alpha1.VolSyncAddOnConfig{
+							ObjectMeta: metav1.ObjectMeta{
+								Name: "test-vsaddonconfig",
+							},
+							Spec: &volsyncaddonv1alpha1.VolSyncAddOnConfigSpec{
+								SubscriptionConfig: &operatorsv1alpha1.SubscriptionConfig{
+									Resources: &corev1.ResourceRequirements{
+										Limits: corev1.ResourceList{
+											corev1.ResourceCPU: cpuLimit,
+										},
+									},
+								},
+							},
+						}
+
+						BeforeEach(func() {
+							// Put this in the same ns as the addondeploymentconfig, it'll get cleaned up too when we delete the ns at end of test
+							volSyncAddOnConfig.Namespace = addonDeploymentConfig.GetNamespace()
+							Expect(testK8sClient.Create(testCtx, volSyncAddOnConfig)).To(Succeed())
+
+							// Update the managedclusteraddon before we create it to add the volsyncaddonconfig
+							mcAddon.Spec.Configs = append(mcAddon.Spec.Configs, addonv1alpha1.AddOnConfig{
+								ConfigGroupResource: addonv1alpha1.ConfigGroupResource{
+									Group:    "addon.open-cluster-management.io",
+									Resource: "volsyncaddonconfigs",
+								},
+								ConfigReferent: addonv1alpha1.ConfigReferent{
+									Name:      volSyncAddOnConfig.GetName(),
+									Namespace: volSyncAddOnConfig.GetNamespace(),
+								},
+							})
+						})
+
+						It("Should use the cpuLimit from the volsyncaddonconfig", func() {
+							Expect(operatorSubscription.Spec.Config).NotTo(BeNil())
+							Expect(operatorSubscription.Spec.Config.NodeSelector).To(Equal(nodePlacement.NodeSelector)) // From addonDeloymentConfig
+							Expect(operatorSubscription.Spec.Config.Tolerations).To(Equal(nodePlacement.Tolerations))   // From addonDeloymentConfig
+
+							// Check cpu limit was set properly
+							Expect(operatorSubscription.Spec.Config.Resources).NotTo(BeNil())
+							Expect(operatorSubscription.Spec.Config.Resources.Limits).NotTo(BeNil())
+							Expect(operatorSubscription.Spec.Config.Resources.Limits.Cpu().Cmp(cpuLimit)).To(Equal(0))
+						})
+					})
+
+					Context("When a VolSyncAddOnConfig is also used with requests, nodeSelector, CatalogSource", func() {
+						cpuLimit, err := resource.ParseQuantity("0.1")
+						Expect(err).NotTo(HaveOccurred())
+						cpuRequest, err := resource.ParseQuantity("50m")
+						Expect(err).NotTo(HaveOccurred())
+						memRequest, err := resource.ParseQuantity("20Mi")
+						Expect(err).NotTo(HaveOccurred())
+
+						volSyncAddOnConfig := &volsyncaddonv1alpha1.VolSyncAddOnConfig{
+							ObjectMeta: metav1.ObjectMeta{
+								Name: "test-lots-vsaddonconfig",
+							},
+							Spec: &volsyncaddonv1alpha1.VolSyncAddOnConfigSpec{
+								SubscriptionCatalogSource: "my-test-catalog",
+								SubscriptionConfig: &operatorsv1alpha1.SubscriptionConfig{
+									NodeSelector: map[string]string{
+										"newselectorkey": "selectorvalue",
+										"bananas":        "grapefruits",
+									},
+
+									Resources: &corev1.ResourceRequirements{
+										Limits: corev1.ResourceList{
+											corev1.ResourceCPU: cpuLimit,
+										},
+										Requests: corev1.ResourceList{
+											corev1.ResourceCPU:    cpuRequest,
+											corev1.ResourceMemory: memRequest,
+										},
+									},
+								},
+							},
+						}
+
+						BeforeEach(func() {
+							// Also set some annotations on the ManagedClusterAddOn
+							mcAddon.Annotations = map[string]string{
+								"operator-subscription-channel":         "testing-0.0",
+								"operator-subscription-source":          "testing-catalog", // Should get overridden by vsAddonConfig
+								"operator-subscription-sourceNamespace": "testing-marketplace-ns",
+							}
+
+							// Create VolSyncAddOnConfig
+							// Put this in the same ns as the addondeploymentconfig, it'll get cleaned up too when we delete the ns at end of test
+							volSyncAddOnConfig.Namespace = addonDeploymentConfig.GetNamespace()
+							Expect(testK8sClient.Create(testCtx, volSyncAddOnConfig)).To(Succeed())
+
+							// Update the managedclusteraddon before we create it to add the volsyncaddonconfig
+							mcAddon.Spec.Configs = append(mcAddon.Spec.Configs, addonv1alpha1.AddOnConfig{
+								ConfigGroupResource: addonv1alpha1.ConfigGroupResource{
+									Group:    "addon.open-cluster-management.io",
+									Resource: "volsyncaddonconfigs",
+								},
+								ConfigReferent: addonv1alpha1.ConfigReferent{
+									Name:      volSyncAddOnConfig.GetName(),
+									Namespace: volSyncAddOnConfig.GetNamespace(),
+								},
+							})
+						})
+
+						It("Should use the values from the volsyncaddonconfig", func() {
+							logger.Info("Subscription", "operatorSubscription", operatorSubscription)
+							Expect(operatorSubscription.Spec.Config).NotTo(BeNil())
+
+							// Tolerations should still be from the addOnDeploymentConfig
+							Expect(operatorSubscription.Spec.Config.Tolerations).To(Equal(nodePlacement.Tolerations)) // From addonDeloymentConfig
+
+							// NodeSelector should override the value from the addOnDeploymentConfig and use value from
+							// the VolSyncAddonConfig
+							Expect(operatorSubscription.Spec.Config.NodeSelector).To(Equal(
+								volSyncAddOnConfig.Spec.SubscriptionConfig.NodeSelector)) // From addonDeloymentConfig
+
+							// Check cpu limit was set properly
+							Expect(operatorSubscription.Spec.Config.Resources).NotTo(BeNil())
+							Expect(operatorSubscription.Spec.Config.Resources.Limits).NotTo(BeNil())
+							Expect(operatorSubscription.Spec.Config.Resources.Limits.Cpu().Cmp(cpuLimit)).To(Equal(0))
+
+							// Check cpu and mem requests were set properly
+							Expect(operatorSubscription.Spec.Config.Resources.Requests).NotTo(BeNil())
+							Expect(operatorSubscription.Spec.Config.Resources.Requests.Cpu().Cmp(cpuRequest)).To(Equal(0))
+							Expect(operatorSubscription.Spec.Config.Resources.Requests.Memory().Cmp(memRequest)).To(Equal(0))
+
+							// Check catalog source is correct (from volsyncaddonconfig)
+							Expect(operatorSubscription.Spec.CatalogSource).To(Equal(
+								volSyncAddOnConfig.Spec.SubscriptionCatalogSource))
+
+							// Check that annotations on the mcao are used (the ones not overridden by volsyncaddonconfig)
+							Expect(operatorSubscription.Spec.Channel).To(Equal("testing-0.0"))
+							Expect(operatorSubscription.Spec.CatalogSourceNamespace).To(Equal("testing-marketplace-ns"))
+
+							// Confirm other spec is still default
+							Expect(string(operatorSubscription.Spec.InstallPlanApproval)).To(Equal(
+								controllers.DefaultInstallPlanApproval))
+							Expect(operatorSubscription.Spec.StartingCSV).To(Equal(controllers.DefaultStartingCSV))
+						})
+					})
+
+					Context("When a volsyncaddonconfig is used and then later modified", func() {
+						origCpuLimit, err := resource.ParseQuantity("0.2")
+						Expect(err).NotTo(HaveOccurred())
+						origMemLimit, err := resource.ParseQuantity("256Mi")
+						Expect(err).NotTo(HaveOccurred())
+
+						volSyncAddOnConfig := &volsyncaddonv1alpha1.VolSyncAddOnConfig{
+							ObjectMeta: metav1.ObjectMeta{
+								Name: "test-update-vsaddonconfig",
+							},
+							Spec: &volsyncaddonv1alpha1.VolSyncAddOnConfigSpec{
+								SubscriptionCatalogSource: "my-test-catalog",
+								SubscriptionConfig: &operatorsv1alpha1.SubscriptionConfig{
+									Resources: &corev1.ResourceRequirements{
+										Limits: corev1.ResourceList{
+											corev1.ResourceCPU:    origCpuLimit,
+											corev1.ResourceMemory: origMemLimit,
+										},
+									},
+								},
+							},
+						}
+
+						BeforeEach(func() {
+							// Create VolSyncAddOnConfig
+							// Put this in the same ns as the addondeploymentconfig, it'll get cleaned up too when
+							// we delete the ns at end of test
+							volSyncAddOnConfig.Namespace = addonDeploymentConfig.GetNamespace()
+							Expect(testK8sClient.Create(testCtx, volSyncAddOnConfig)).To(Succeed())
+
+							// Update the managedclusteraddon before we create it to add the volsyncaddonconfig
+							mcAddon.Spec.Configs = append(mcAddon.Spec.Configs, addonv1alpha1.AddOnConfig{
+								ConfigGroupResource: addonv1alpha1.ConfigGroupResource{
+									Group:    "addon.open-cluster-management.io",
+									Resource: "volsyncaddonconfigs",
+								},
+								ConfigReferent: addonv1alpha1.ConfigReferent{
+									Name:      volSyncAddOnConfig.GetName(),
+									Namespace: volSyncAddOnConfig.GetNamespace(),
+								},
+							})
+						})
+
+						It("Should reconcile the managedclusteraddon automatically and update", func() {
+							logger.Info("Subscription", "operatorSubscription", operatorSubscription)
+							Expect(operatorSubscription.Spec.Config).NotTo(BeNil())
+
+							// Check limits were set properly (original values from volsyncaddonconfig)
+							Expect(operatorSubscription.Spec.Config.Resources).NotTo(BeNil())
+							Expect(operatorSubscription.Spec.Config.Resources.Limits).NotTo(BeNil())
+							Expect(operatorSubscription.Spec.Config.Resources.Limits.Cpu().Cmp(origCpuLimit)).To(Equal(0))
+							Expect(operatorSubscription.Spec.Config.Resources.Limits.Memory().Cmp(origMemLimit)).To(Equal(0))
+
+							updatedCpuLimit, err := resource.ParseQuantity("800m")
+							Expect(err).NotTo(HaveOccurred())
+							updatedMemLimit, err := resource.ParseQuantity("2Gi")
+							Expect(err).NotTo(HaveOccurred())
+
+							// Now modify the volsyncaddonconfig and verify the changes are reconciled
+							Eventually(func() error {
+								// Update the volsyncaddonconfig
+								err := testK8sClient.Get(testCtx, client.ObjectKeyFromObject(volSyncAddOnConfig), volSyncAddOnConfig)
+								if err != nil {
+									return err
+								}
+								volSyncAddOnConfig.Spec.SubscriptionConfig.Resources.Limits = corev1.ResourceList{
+									corev1.ResourceCPU:    updatedCpuLimit,
+									corev1.ResourceMemory: updatedMemLimit,
+								}
+								return testK8sClient.Update(testCtx, volSyncAddOnConfig)
+							}, timeout, interval).Should(Succeed())
+
+							// Now the controller should be alerted to do a reconcile and apply the updates
+							Eventually(func() error {
+								// Re-load the manifestwork
+								err := testK8sClient.Get(testCtx, client.ObjectKeyFromObject(manifestWork), manifestWork)
+								if err != nil {
+									return err
+								}
+
+								// Extract the Subscription from the manifest work so we can check it
+								subMF := manifestWork.Spec.Workload.Manifests[0]
+								subObj, _, err := genericCodec.Decode(subMF.Raw, nil, nil)
+								Expect(err).NotTo(HaveOccurred())
+								var ok bool
+								operatorSubscription, ok = subObj.(*operatorsv1alpha1.Subscription)
+								Expect(ok).To(BeTrue())
+								Expect(operatorSubscription).NotTo(BeNil())
+
+								if operatorSubscription.Spec.Config.Resources.Limits.Cpu().Cmp(updatedCpuLimit) != 0 {
+									// still hasn't been updated
+									return fmt.Errorf("Operator Subscription in manifest work has not been " +
+										"updated with the new limits")
+								}
+
+								return nil
+							}, maxWait, interval).Should(Succeed())
+
+							// The operatorSubscription has been updated - confirm we have the correct values
+							Expect(operatorSubscription.Spec.Config.Resources.Limits.Cpu().
+								Cmp(updatedCpuLimit)).To(Equal(0))
+							Expect(operatorSubscription.Spec.Config.Resources.Limits.Memory().
+								Cmp(updatedMemLimit)).To(Equal(0))
+						})
+					})
 				})
 			})
 
@@ -688,7 +950,7 @@ var _ = Describe("Addoncontroller", func() {
 						Namespace: defaultAddonDeploymentConfig.GetNamespace(),
 					}
 
-					// Create a ManagedClusterAddon for the mgd cluster using an addonDeploymentconfig
+					// Create a ManagedClusterAddon for the mgd cluster
 					mcAddon = &addonv1alpha1.ManagedClusterAddOn{
 						ObjectMeta: metav1.ObjectMeta{
 							Name:      "volsync",
@@ -801,6 +1063,79 @@ var _ = Describe("Addoncontroller", func() {
 						Expect(operatorSubscription.Spec.Config.Tolerations).To(Equal(nodePlacement.Tolerations))
 					})
 				})
+
+				Context("When a default volsyncaddonconfig is also set in the clustermanagementconfig", func() {
+					defaultCpuLimit, err := resource.ParseQuantity("1")
+					Expect(err).NotTo(HaveOccurred())
+					defaultMemLimit, err := resource.ParseQuantity("1.2Gi")
+					Expect(err).NotTo(HaveOccurred())
+
+					defaultCpuRequest, err := resource.ParseQuantity("0.02")
+					Expect(err).NotTo(HaveOccurred())
+					defaultMemRequest, err := resource.ParseQuantity("50Mi")
+					Expect(err).NotTo(HaveOccurred())
+
+					defaultVolSyncAddOnConfig := &volsyncaddonv1alpha1.VolSyncAddOnConfig{
+						ObjectMeta: metav1.ObjectMeta{
+							Name: "test-vsaddonconfig",
+						},
+						Spec: &volsyncaddonv1alpha1.VolSyncAddOnConfigSpec{
+							SubscriptionCatalogSource: "my-test-catalog",
+							SubscriptionConfig: &operatorsv1alpha1.SubscriptionConfig{
+								NodeSelector: map[string]string{
+									"fruit":  "pinapple",
+									"planet": "jupiter",
+								},
+
+								Resources: &corev1.ResourceRequirements{
+									Limits: corev1.ResourceList{
+										corev1.ResourceCPU:    defaultCpuLimit,
+										corev1.ResourceMemory: defaultMemLimit,
+									},
+									Requests: corev1.ResourceList{
+										corev1.ResourceCPU:    defaultCpuRequest,
+										corev1.ResourceMemory: defaultMemRequest,
+									},
+								},
+							},
+						},
+					}
+
+					BeforeEach(func() {
+						// Create default VolSyncAddOnConfig
+						// Put this in the same ns as the addondeploymentconfig, it'll get cleaned up too when we delete the ns at end of test
+						defaultVolSyncAddOnConfig.Namespace = defaultAddonDeploymentConfig.GetNamespace()
+						Expect(testK8sClient.Create(testCtx, defaultVolSyncAddOnConfig)).To(Succeed())
+
+						// Update the ClusterManagementAddOn before we create it to set a default volsyncaddonconfig
+						clusterManagementAddon.Spec.SupportedConfigs[1].DefaultConfig = &addonv1alpha1.ConfigReferent{
+							Name:      defaultVolSyncAddOnConfig.GetName(),
+							Namespace: defaultVolSyncAddOnConfig.GetNamespace(),
+						}
+					})
+
+					It("Should create the sub in the manifestwork with settings from the volsyncAddOnConfig", func() {
+						Expect(operatorSubscription.Spec.Config).ToNot(BeNil())
+
+						// Settings from the default deploymentAddOnConfig
+						Expect(operatorSubscription.Spec.Config.Tolerations).To(Equal(defaultNodePlacement.Tolerations))
+
+						//
+						// Settings from the volsyncaddonconfig
+						//
+						// This one should override the nodeSelector from the addonDeploymentConfig
+						Expect(operatorSubscription.Spec.Config.NodeSelector).To(Equal(defaultVolSyncAddOnConfig.Spec.SubscriptionConfig.NodeSelector))
+						// Check cpu limit was set properly
+						Expect(operatorSubscription.Spec.Config.Resources).NotTo(BeNil())
+						Expect(operatorSubscription.Spec.Config.Resources.Limits).NotTo(BeNil())
+						Expect(operatorSubscription.Spec.Config.Resources.Limits.Cpu().Cmp(defaultCpuLimit)).To(Equal(0))
+						Expect(operatorSubscription.Spec.Config.Resources.Limits.Memory().Cmp(defaultMemLimit)).To(Equal(0))
+						// Check cpu and mem requests were set properly
+						Expect(operatorSubscription.Spec.Config.Resources.Requests).NotTo(BeNil())
+						Expect(operatorSubscription.Spec.Config.Resources.Requests.Cpu().Cmp(defaultCpuRequest)).To(Equal(0))
+						Expect(operatorSubscription.Spec.Config.Resources.Requests.Memory().Cmp(defaultMemRequest)).To(Equal(0))
+					})
+				})
 			})
 		})
 	})
@@ -893,6 +1228,12 @@ var _ = Describe("Addon Status Update Tests", func() {
 						ConfigGroupResource: addonv1alpha1.ConfigGroupResource{
 							Group:    "addon.open-cluster-management.io",
 							Resource: "addondeploymentconfigs",
+						},
+					},
+					{
+						ConfigGroupResource: addonv1alpha1.ConfigGroupResource{
+							Group:    "addon.open-cluster-management.io",
+							Resource: "volsyncaddonconfigs",
 						},
 					},
 				},
@@ -1134,7 +1475,7 @@ var _ = Describe("Addon Status Update Tests", func() {
 							return statusCondition.Reason == "ProbeAvailable"
 						}, timeout, interval).Should(BeTrue())
 
-						logger.Info("#### status condition", "statusCondition", statusCondition)
+						logger.Info("status condition", "statusCondition", statusCondition)
 
 						Expect(statusCondition.Reason).To(Equal("ProbeAvailable"))
 						Expect(statusCondition.Status).To(Equal(metav1.ConditionTrue))
@@ -1163,7 +1504,7 @@ var _ = Describe("Addon Status Update Tests", func() {
 							return nil
 						}
 
-						logger.Info("### status should not be successful", "mcAddon.Status.Conditions", mcAddon.Status.Conditions)
+						logger.Info("status should not be successful", "mcAddon.Status.Conditions", mcAddon.Status.Conditions)
 						statusCondition = meta.FindStatusCondition(mcAddon.Status.Conditions,
 							addonv1alpha1.ManagedClusterAddOnConditionAvailable)
 						return statusCondition

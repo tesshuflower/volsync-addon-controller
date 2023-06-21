@@ -10,6 +10,7 @@ PROJECT_DIR := $(shell dirname $(abspath $(lastword $(MAKEFILE_LIST))))
 
 # Helper software versions
 GOLANGCI_VERSION := v1.54.2
+CONTROLLER_TOOLS_VERSION := v0.10.0
 
 GO_LD_EXTRAFLAGS ?=
 
@@ -32,12 +33,20 @@ endef
 GO_LD_FLAGS ?="$(call version-ldflags) $(GO_LD_EXTRAFLAGS)"
 
 .PHONY: docker-build
-docker-build: test ## Build docker image
+docker-build: manifests generate test ## Build docker image
 	docker build --build-arg "versionFromGit_arg=$(GIT_VERSION)" --build-arg "commitFromGit_arg=$(GIT_COMMIT)" -t ${IMG} .
 
 .PHONY: docker-push
 docker-push: ## Push docker image with the manager.
 	docker push ${IMG}
+
+.PHONY: manifests
+manifests: controller-gen ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects.
+	$(CONTROLLER_GEN) rbac:roleName=manager-role crd webhook paths="./..." output:crd:artifacts:config=api/v1alpha1
+
+.PHONY: generate
+generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
+	$(CONTROLLER_GEN) object paths="./api/..."
 
 ## Location to install dependencies to
 LOCALBIN ?= $(PROJECT_DIR)/bin
@@ -66,6 +75,13 @@ golangci-lint: $(GOLANGCILINT) ## Download golangci-lint
 $(GOLANGCILINT): $(LOCALBIN)
 	curl -sSfL $(GOLANGCI_URL) | sh -s -- -b $(LOCALBIN) $(GOLANGCI_VERSION)
 
+.PHONY: controller-gen
+CONTROLLER_GEN := $(LOCALBIN)/controller-gen
+controller-gen: $(CONTROLLER_GEN) ## Download controller-gen locally if necessary.
+# -mod=mod is a workaround for a go bug and can probably be removed when we move to go 1.20
+$(CONTROLLER_GEN): $(LOCALBIN)
+	test -s $@ || GOBIN=$(LOCALBIN) go install -mod=mod sigs.k8s.io/controller-tools/cmd/controller-gen@$(CONTROLLER_TOOLS_VERSION)
+
 .PHONY: envtest
 ENVTEST = $(LOCALBIN)/setup-envtest
 envtest: $(ENVTEST) ## Download envtest-setup locally if necessary.
@@ -79,5 +95,5 @@ $(GINKGO): $(LOCALBIN)
 	GOBIN=$(LOCALBIN) go install github.com/onsi/ginkgo/v2/ginkgo@latest
 
 .PHONY: build
-build:
+build: manifests generate
 	GO111MODULE=on go build -a -o bin/controller -ldflags $(GO_LD_FLAGS) main.go

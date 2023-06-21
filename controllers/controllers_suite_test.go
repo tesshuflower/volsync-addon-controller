@@ -21,6 +21,7 @@ import (
 	operatorsv1 "github.com/operator-framework/api/pkg/operators/v1"
 	operatorsv1alpha1 "github.com/operator-framework/api/pkg/operators/v1alpha1"
 
+	volsyncaddonv1alpha1 "github.com/stolostron/volsync-addon-controller/api/v1alpha1"
 	"github.com/stolostron/volsync-addon-controller/controllers"
 )
 
@@ -50,7 +51,7 @@ var _ = BeforeSuite(func() {
 	testEnv = &envtest.Environment{
 		CRDDirectoryPaths: []string{
 			// CRDs
-			//filepath.Join("..", "config", "crd", "bases"),
+			filepath.Join("..", "api", "v1alpha1"),
 			// CRDs needed for tests
 			filepath.Join("..", "hack", "crds"),
 		},
@@ -64,6 +65,8 @@ var _ = BeforeSuite(func() {
 	//
 	// Using controller-client for these unit tests just for ease of use
 	//
+	err = volsyncaddonv1alpha1.AddToScheme(scheme.Scheme)
+	Expect(err).ToNot(HaveOccurred())
 	err = addonv1alpha1.AddToScheme(scheme.Scheme)
 	Expect(err).ToNot(HaveOccurred())
 	err = clusterv1.AddToScheme(scheme.Scheme)

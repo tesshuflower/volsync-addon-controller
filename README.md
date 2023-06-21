@@ -180,7 +180,20 @@ spec: {}
 Replace `MANAGED_CLUSTER_NAMESPACE` with the namespace of your managed cluster (this is the same as the managed cluster
 name)
 
-## Setting nodeSelectors or tolerations in the volsync deploys on managed clusters
+## Customizing VolSync operator installs on managed clusters
+
+When the VolSync operator is installed on a managed cluster via a ManagedClusterAddOn, it can be further
+customized via an AddOnDeploymentConfig and VolSyncAddOnConfig.
+
+- The `AddOnDeploymentConfig` is a resource that can be used for many addons and can be used to specify
+node selectors and tolerations. It can be set on the ManagedClusterAddOn resource itself, or a default can be used
+so that all VolSync operator installs done by the volsync-addon-controller inherit the same settings.
+
+- A `VolSyncAddOnConfig` can be used to customize the VolSync operator install on a managed cluster.  It can
+  be set on the ManagedClusterAddOn resource itself, or a default ca be used so that all VolSync operator installs
+  done by the volsync-addon-controller inherit the same settings.
+
+### AddOnDeloymentConfig: Setting nodeSelectors or tolerations in the volsync deploys on managed clusters
 
 This is part of [story](https://github.com/stolostron/backlog/issues/26712).  Also see the dev
 guide [here](https://docs.google.com/document/d/1MkYz3RKjU67vn5qXCDCQ5i3eAxdLUbaTq1mCw3ObV3I/edit#)
@@ -191,7 +204,8 @@ now included in the volsync-addon-controller-charts - so there should be one dep
 The ClusterManagementAddOn can be edited to indicate that the addon can refer to a AddonDeploymentConfig.  The
 AddonDeploymentConfig CR is the resource where node selectors and tolerations can be specified.
 
-Edit the volsync ClusterManagementAddOn and add supportedConfigs section to add `addondeploymentconfigs`:
+Edit the volsync ClusterManagementAddOn and add supportedConfigs section to add `addondeploymentconfigs` if
+it's not already there:
 
 ```yaml
 apiVersion: addon.open-cluster-management.io/v1alpha1
@@ -213,7 +227,7 @@ Now the addonDeploymentConfig can be created on the hub, here is an example:
 apiVersion: addon.open-cluster-management.io/v1alpha1
 kind: AddOnDeploymentConfig
 metadata:
-  name: volsync-addondeployconfig
+  name: volsync-addondeploymentconfig
   namespace: default
 spec:
   nodePlacement:
@@ -264,7 +278,111 @@ spec:
   - group: addon.open-cluster-management.io
     resource: addondeploymentconfigs
     defaultConfig:
-      name: volsync-addondeployconfig
+      name: volsync-addondeploymentconfig
+      namespace: default
+```
+
+### VolSyncAddonConfig: Override default settings on the VolSync Operator to be installed on a managed cluster
+
+To use override default settings in a VolSync Operator deploy that is done via a ManagedClusterAddOn, a
+ClusterManagementAddOn for VolSync should first exist on the hub.  Note that this is now included in the
+volsync-addon-controller-charts - so there should be one deployed by default when deploying ACM.
+
+The ClusterManagementAddOn can be edited to indicate that the addon can refer to a VolSyncAddOnConfig.  The
+VolSyncAddOnConfig CR is the resource where VolSync configuration can be done.
+
+Edit the volsync ClusterManagementAddOn and add supportedConfigs section to add `volsyncaddonconfigs` if
+it's not already there:
+
+```yaml
+apiVersion: addon.open-cluster-management.io/v1alpha1
+kind: ClusterManagementAddOn
+metadata:
+  name: volsync
+spec:
+  addOnMeta:
+    displayName: VolSync
+    description: VolSync
+  supportedConfigs:
+  - group: addon.open-cluster-management.io
+    resource: addondeploymentconfigs
+  - group: addon.open-cluster-management.io
+    resource: volsyncaddonconfigs
+```
+
+Now the volSyncAddOnConfig can be created on the hub, here is an example:
+
+```yaml
+apiVersion: addon.open-cluster-management.io/v1alpha1
+kind: VolSyncAddOnConfig
+metadata:
+  name: my-volsyncaddonconfig
+  namespace: default
+spec:
+  subscriptionCatalogSource: "my-custom-catalog"
+  subscriptionConfig:
+    resources:
+      limits:
+        cpu: 600m
+        memory: 256Mi
+      requests:
+        cpu: 50m
+        memory: 128Mi
+```
+
+This example will set limits/requests on the deployed VolSync Operator when used by setting these values
+in the VolSync operator subscription, and will also update the operator subscription to use a catalogSource of
+"my-custom-catalog". Note that the catalogSource can also be overridden via annotations on the ManagedClusterAddOn.
+If the annotation was set, the value in the VolSyncAddOnConfig would take precendence.
+
+To actually tell the volsync deploy (via the operator subscription) to use the volSyncAddonConfig, it can either
+be specified as a default in the `ClusterManagementAddOn` or it can be specified on an individual deploy basis
+by setting it in the `ManagedClusterAddOn`.
+
+To set on a ManagedClusterAdddon, you can do it like this on the hub:
+
+```yaml
+apiVersion: addon.open-cluster-management.io/v1alpha1
+kind: ManagedClusterAddOn
+metadata:
+  name: volsync
+  namespace: cluster1
+spec:
+  configs:
+  - group: addon.open-cluster-management.io
+    resource: volsyncaddonconfigs
+    name: my-volsyncaddonconfig
+    namespace: default
+```
+
+Note that this can also be combined with a addonDeploymentConfig if you want to specify node tolerations/selectors.
+
+If instead you want to set this as the default for any VolSync ManagedClusterAddOn then you can set it as the default
+in the ClusterManagementAddon on the hub.  Note that the default can be overridden for an individual cluster by
+specifying the volsyncaddonconfig in the ManagedClusterAddOn individually (as above).
+
+Example of setting a default in the ClusterManagementAddOn (on the hub) - this example sets a default
+addonDeploymentConfig as well as a default volSyncAddonConfig:
+
+```yaml
+apiVersion: addon.open-cluster-management.io/v1alpha1
+kind: ClusterManagementAddOn
+metadata:
+  name: volsync
+spec:
+  addOnMeta:
+    displayName: VolSync
+    description: VolSync
+  supportedConfigs:
+  - group: addon.open-cluster-management.io
+    resource: addondeploymentconfigs
+    defaultConfig:
+      name: volsync-addondeploymentconfig
+      namespace: default
+  - group: addon.open-cluster-management.io
+    resource: volsyncaddonconfigs
+    defaultConfig:
+      name: my-volsyncaddonconfig
       namespace: default
 ```
 

@@ -14,7 +14,7 @@ spec:
 {{- if .StartingCSV }}
   startingCSV: {{ .StartingCSV }}
 {{- end}}
-{{- if or .NodeSelector .Tolerations }}
+{{- if or .NodeSelector .Tolerations .ResourceRequests .ResourceLimits}}
   config:
   {{- if .NodeSelector }}
     nodeSelector:
@@ -34,5 +34,19 @@ spec:
       {{- end }}
     {{- end }}
   {{- end }}
+  {{- if or .ResourceRequests .ResourceLimits }}
+    resources:
+    {{- if .ResourceRequests }}
+      requests:
+      {{- range $key, $value := .ResourceRequests }}
+        "{{ $key }}": "{{ $value.ToUnstructured }}"
+      {{- end }}
+    {{- end }}
+    {{- if .ResourceLimits }}
+      limits:
+      {{- range $key, $value := .ResourceLimits }}
+        "{{ $key }}": "{{ $value.ToUnstructured }}"
+      {{- end }}
+    {{- end }}
+  {{- end }}
 {{- end }}
-
