@@ -17,6 +17,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
+	"open-cluster-management.io/addon-framework/pkg/addonfactory"
 	addonv1alpha1 "open-cluster-management.io/api/addon/v1alpha1"
 	clusterv1 "open-cluster-management.io/api/cluster/v1"
 	workv1 "open-cluster-management.io/api/work/v1"
@@ -775,10 +776,9 @@ var _ = Describe("Addoncontroller", func() {
 							// Tolerations should still be from the addOnDeploymentConfig
 							Expect(operatorSubscription.Spec.Config.Tolerations).To(Equal(nodePlacement.Tolerations)) // From addonDeloymentConfig
 
-							// NodeSelector should override the value from the addOnDeploymentConfig and use value from
-							// the VolSyncAddonConfig
+							// NodeSelector should use the value from the addOnDeploymentConfig not the VolSyncAddonConfig
 							Expect(operatorSubscription.Spec.Config.NodeSelector).To(Equal(
-								volSyncAddOnConfig.Spec.SubscriptionConfig.NodeSelector)) // From addonDeloymentConfig
+								nodePlacement.NodeSelector)) // From addonDeloymentConfig
 
 							// Check cpu limit was set properly
 							Expect(operatorSubscription.Spec.Config.Resources).NotTo(BeNil())
@@ -1119,12 +1119,11 @@ var _ = Describe("Addoncontroller", func() {
 
 						// Settings from the default deploymentAddOnConfig
 						Expect(operatorSubscription.Spec.Config.Tolerations).To(Equal(defaultNodePlacement.Tolerations))
+						Expect(operatorSubscription.Spec.Config.NodeSelector).To(Equal(defaultNodePlacement.NodeSelector))
 
 						//
 						// Settings from the volsyncaddonconfig
 						//
-						// This one should override the nodeSelector from the addonDeploymentConfig
-						Expect(operatorSubscription.Spec.Config.NodeSelector).To(Equal(defaultVolSyncAddOnConfig.Spec.SubscriptionConfig.NodeSelector))
 						// Check cpu limit was set properly
 						Expect(operatorSubscription.Spec.Config.Resources).NotTo(BeNil())
 						Expect(operatorSubscription.Spec.Config.Resources.Limits).NotTo(BeNil())
@@ -1516,6 +1515,250 @@ var _ = Describe("Addon Status Update Tests", func() {
 						Expect(statusCondition.Status).To(Equal(metav1.ConditionUnknown))
 					*/
 				})
+			})
+		})
+	})
+})
+
+// Tests of the function that creates the subscription - make sure settings are all set from the correct place
+var _ = Describe("VolSync subscription creation tests", func() {
+	vsAgent := controllers.NewVolSyncAgent(nil /* not used in these tests */, testK8sClient)
+
+	var volsyncSubscription *operatorsv1alpha1.Subscription
+
+	var mcAddOn *addonv1alpha1.ManagedClusterAddOn
+	var vsAddOnConfig *volsyncaddonv1alpha1.VolSyncAddOnConfig
+	var deploymentConfig *addonv1alpha1.AddOnDeploymentConfig
+
+	BeforeEach(func() {
+		mcAddOn = &addonv1alpha1.ManagedClusterAddOn{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "volsync",
+				Namespace: "mgd-cluster-abc-123",
+			},
+			Spec: addonv1alpha1.ManagedClusterAddOnSpec{}, // Setting spec to empty,
+		}
+		vsAddOnConfig = nil    // Reset for each test
+		deploymentConfig = nil // Reset for each test
+	})
+
+	JustBeforeEach(func() {
+		var vsAddOnConfigSpec *volsyncaddonv1alpha1.VolSyncAddOnConfigSpec
+		if vsAddOnConfig != nil {
+			vsAddOnConfigSpec = vsAddOnConfig.Spec
+		}
+		var deploymentConfigValues addonfactory.Values
+		var err error
+		if deploymentConfig != nil {
+			deploymentConfigValues, err = addonfactory.ToAddOnDeploymentConfigValues(*deploymentConfig)
+			Expect(err).NotTo(HaveOccurred())
+		}
+
+		volsyncSubscription, err = vsAgent.VolsyncOperatorSubscription(mcAddOn, vsAddOnConfigSpec, deploymentConfigValues)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(volsyncSubscription).NotTo(BeNil())
+
+		// These settings should always be set
+		Expect(volsyncSubscription.GetName()).To(Equal(controllers.OperatorName))
+		Expect(volsyncSubscription.GetNamespace()).To(Equal(controllers.GlobalOperatorInstallNamespace))
+		Expect(volsyncSubscription.Spec).NotTo(BeNil())
+		Expect(volsyncSubscription.Spec.Package).To(Equal(controllers.OperatorName))
+	})
+
+	Context("When no volsyncAddOnConfig or deploymentConfig is set", func() {
+		Context("When no annotations are set", func() {
+			It("subscription should use defaults", func() {
+				// Check all defaults are set properly
+				Expect(volsyncSubscription.Spec.CatalogSource).To(Equal(controllers.DefaultCatalogSource))
+				Expect(volsyncSubscription.Spec.CatalogSourceNamespace).To(Equal(controllers.DefaultCatalogSourceNamespace))
+				Expect(volsyncSubscription.Spec.Channel).To(Equal(controllers.DefaultChannel))
+				Expect(volsyncSubscription.Spec.InstallPlanApproval).To(Equal(
+					operatorsv1alpha1.Approval(controllers.DefaultInstallPlanApproval)))
+				Expect(volsyncSubscription.Spec.StartingCSV).To(Equal(controllers.DefaultStartingCSV))
+				// spec.config should be nil by default
+				Expect(volsyncSubscription.Spec.Config).To(BeNil())
+			})
+		})
+
+		Context("When annotations are set", func() {
+			BeforeEach(func() {
+				mcAddOn.Annotations = map[string]string{
+					controllers.AnnotationChannelOverride:             "test-channel",
+					controllers.AnnotationInstallPlanApprovalOverride: "Manual",
+				}
+			})
+
+			It("subscription should use the annotated values", func() {
+				// Should be taken from our annotations on the managedclusteraddon
+				Expect(volsyncSubscription.Spec.Channel).To(Equal("test-channel"))
+				Expect(volsyncSubscription.Spec.InstallPlanApproval).To(Equal(
+					operatorsv1alpha1.Approval("Manual")))
+				// Other values should still be defaults
+				Expect(volsyncSubscription.Spec.CatalogSource).To(Equal(controllers.DefaultCatalogSource))
+			})
+		})
+	})
+
+	Context("When a volsyncAddonConfig is used", func() {
+		BeforeEach(func() {
+			cpuLimit, err := resource.ParseQuantity("50m")
+			Expect(err).NotTo(HaveOccurred())
+
+			vsAddOnConfig = &volsyncaddonv1alpha1.VolSyncAddOnConfig{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vsaddonconfig",
+					Namespace: "some-ns-name",
+				},
+				Spec: &volsyncaddonv1alpha1.VolSyncAddOnConfigSpec{
+					SubscriptionChannel: "channel-picked-by-vsaddonconfig",
+					SubscriptionConfig: &operatorsv1alpha1.SubscriptionConfig{
+						NodeSelector: map[string]string{
+							"picknode": "picklabel",
+							"label2":   "label2value",
+						},
+						Tolerations: []corev1.Toleration{
+							{
+								Key:      "node.kubernetes.io/unreachable",
+								Operator: corev1.TolerationOpExists,
+								Effect:   corev1.TaintEffectNoSchedule,
+							},
+						},
+						Resources: &corev1.ResourceRequirements{
+							Limits: corev1.ResourceList{
+								corev1.ResourceCPU: cpuLimit,
+							},
+						},
+						Env: []corev1.EnvVar{
+							{
+								Name:  "FRUIT",
+								Value: "bananas",
+							},
+							{
+								Name:  "VEGETABLE",
+								Value: "broccoli",
+							},
+						},
+					},
+				},
+			}
+		})
+
+		It("Subscription should set resource and env vars from the vsAddonConfig", func() {
+			// For all cases here, env vars and resource requirements should come from vsAddOnConfig
+			// (deploymentConfig does not allow to override env vars or resourcerequirements)
+
+			// Resource requirements
+			Expect(volsyncSubscription.Spec.Config.Resources).To(Equal(vsAddOnConfig.Spec.SubscriptionConfig.Resources))
+
+			// Check that env vars are set
+			Expect(volsyncSubscription.Spec.Config.Env[0]).To(Equal(corev1.EnvVar{Name: "FRUIT", Value: "bananas"}))
+			Expect(volsyncSubscription.Spec.Config.Env[1]).To(Equal(corev1.EnvVar{Name: "VEGETABLE", Value: "broccoli"}))
+		})
+
+		Context("When no annotations are set", func() {
+			It("subscription should use defaults", func() {
+				// Defaults
+				Expect(volsyncSubscription.Spec.CatalogSource).To(Equal(controllers.DefaultCatalogSource))
+				Expect(volsyncSubscription.Spec.CatalogSourceNamespace).To(Equal(controllers.DefaultCatalogSourceNamespace))
+				Expect(volsyncSubscription.Spec.InstallPlanApproval).To(Equal(
+					operatorsv1alpha1.Approval(controllers.DefaultInstallPlanApproval)))
+				Expect(volsyncSubscription.Spec.StartingCSV).To(Equal(controllers.DefaultStartingCSV))
+
+				// Should come from vsAddOnConfig
+				Expect(volsyncSubscription.Spec.Channel).To(Equal(vsAddOnConfig.Spec.SubscriptionChannel))
+				Expect(volsyncSubscription.Spec.Config).To(Equal(vsAddOnConfig.Spec.SubscriptionConfig))
+
+			})
+		})
+
+		Context("When annotations are set", func() {
+			BeforeEach(func() {
+				mcAddOn.Annotations = map[string]string{
+					controllers.AnnotationChannelOverride:             "test-channel",
+					controllers.AnnotationInstallPlanApprovalOverride: "Manual",
+				}
+			})
+
+			It("subscription should use the vsAddonConfig ahead of annotated values", func() {
+				// Should be taken from our annotations on the managedclusteraddon since not set in vsAddOnConfig
+				Expect(volsyncSubscription.Spec.InstallPlanApproval).To(Equal(
+					operatorsv1alpha1.Approval("Manual")))
+
+				// Should be taken from the vsAddonConfig, overriding value from annotation
+				Expect(volsyncSubscription.Spec.Channel).To(Equal(vsAddOnConfig.Spec.SubscriptionChannel))
+
+				// Other values should still be defaults
+				Expect(volsyncSubscription.Spec.CatalogSource).To(Equal(controllers.DefaultCatalogSource))
+			})
+		})
+
+		Context("when no deploymentConfig is used", func() {
+			It("Subscription nodeToleration, nodeResources should come from the vsAddonConfig", func() {
+				Expect(volsyncSubscription.Spec.Config.NodeSelector).To(Equal(vsAddOnConfig.Spec.SubscriptionConfig.NodeSelector))
+				Expect(volsyncSubscription.Spec.Config.Tolerations).To(Equal(vsAddOnConfig.Spec.SubscriptionConfig.Tolerations))
+			})
+		})
+
+		Context("When a deploymentConfig is used", func() {
+			BeforeEach(func() {
+				deploymentConfig = &addonv1alpha1.AddOnDeploymentConfig{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "my-deployment-config",
+						Namespace: "doesntmatter-ns-name",
+					},
+					Spec: addonv1alpha1.AddOnDeploymentConfigSpec{
+						NodePlacement: &addonv1alpha1.NodePlacement{
+							NodeSelector: map[string]string{
+								"noderole": "test",
+								"planet":   "earth",
+							},
+						},
+					},
+				}
+			})
+
+			It("Subscription should use values from the deploymentConfig before the vsAddonConfig", func() {
+				// NodeSelector was specified in the deploymentConfig so it should be used
+				Expect(volsyncSubscription.Spec.Config.NodeSelector).To(Equal(deploymentConfig.Spec.NodePlacement.NodeSelector))
+
+				// The deploymentConfig didn't specify tolerations, so they should still be coming from
+				// the vsAddOnConfig
+				Expect(volsyncSubscription.Spec.Config.Tolerations).To(Equal(vsAddOnConfig.Spec.SubscriptionConfig.Tolerations))
+			})
+		})
+	})
+
+	Context("When no vsAddOnConfig is used", func() {
+		Context("When a deploymentConfig is used", func() {
+			BeforeEach(func() {
+				deploymentConfig = &addonv1alpha1.AddOnDeploymentConfig{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "my-test-depl-config",
+						Namespace: "my-ns-name",
+					},
+					Spec: addonv1alpha1.AddOnDeploymentConfigSpec{
+						NodePlacement: &addonv1alpha1.NodePlacement{
+							NodeSelector: map[string]string{
+								"node-type": "biggest",
+								"planet":    "jupiter",
+							},
+							Tolerations: []corev1.Toleration{
+								{
+									Key:      "node.kubernetes.io/unreachable",
+									Operator: corev1.TolerationOpExists,
+									Effect:   corev1.TaintEffectNoSchedule,
+								},
+							},
+						},
+					},
+				}
+			})
+
+			It("Subscription should use values from the deploymentConfig", func() {
+				// NodeSelector was specified in the deploymentConfig so it should be used
+				Expect(volsyncSubscription.Spec.Config.NodeSelector).To(Equal(deploymentConfig.Spec.NodePlacement.NodeSelector))
+				// Tolerations were specified in the deploymentConfig so they should be used
+				Expect(volsyncSubscription.Spec.Config.Tolerations).To(Equal(deploymentConfig.Spec.NodePlacement.Tolerations))
 			})
 		})
 	})

@@ -2,18 +2,15 @@ package controllers
 
 import (
 	"context"
-	"embed"
 	"fmt"
 	"strings"
 
-	"github.com/openshift/library-go/pkg/assets"
 	operatorsv1 "github.com/operator-framework/api/pkg/operators/v1"
 	operatorsv1alpha1 "github.com/operator-framework/api/pkg/operators/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apimachinery/pkg/runtime/serializer"
 	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/kubernetes/scheme"
@@ -41,16 +38,14 @@ import (
 
 var (
 	genericScheme = runtime.NewScheme()
-	genericCodecs = serializer.NewCodecFactory(genericScheme)
-	genericCodec  = genericCodecs.UniversalDeserializer()
 )
 
 const (
 	addonName                      = "volsync"
-	operatorName                   = "volsync-product"
-	globalOperatorInstallNamespace = "openshift-operators"
+	OperatorName                   = "volsync-product"
+	GlobalOperatorInstallNamespace = "openshift-operators"
 
-	// Defaults for ACM-2.8
+	// Defaults for ACM-2.9
 	DefaultCatalogSource          = "redhat-operators"
 	DefaultCatalogSourceNamespace = "openshift-marketplace"
 	DefaultChannel                = "stable-0.8" // No "acm-x.y" channel anymore - aligning ACM-2.9 with stable-0.8
@@ -102,43 +97,19 @@ func init() {
 	utilruntime.Must(volsyncaddonv1alpha1.AddToScheme(genericScheme))
 }
 
-//go:embed manifests
-var fs embed.FS
-
-// If operator is deployed to a single namespace, the Namespace, OperatorGroup (and role to create the operatorgroup)
-// is required, along with the Subscription for the operator
-// This particular operator is deploying into all namespaces, but into a specific target namespace
-// (Requires the annotation  operatorframework.io/suggested-namespace: "mynamespace"  to be set on the operator CSV)
-var manifestFilesAllNamespacesInstallIntoSuggestedNamespace = []string{
-	"manifests/operatorgroup-aggregate-clusterrole.yaml",
-	"manifests/operator-namespace.yaml",
-	"manifests/operator-group-allnamespaces.yaml",
-	"manifests/operator-subscription.yaml",
-}
-
-// Use these manifest files if deploying an operator into own namespace
-//var manifestFilesOwnNamepace = []string{
-//	"manifests/operatorgroup-aggregate-clusterrole.yaml",
-//	"manifests/operator-namespace.yaml",
-//	"manifests/operator-group-ownnamespace.yaml",
-//	"manifests/operator-subscription.yaml",
-//}
-
-// If operator is deployed to a all namespaces and the operator wil be deployed into the global operators namespace
-// (openshift-operators on OCP), the only thing needed is the Subscription for the operator
-var manifestFilesAllNamespaces = []string{
-	"manifests/operator-subscription.yaml",
-}
-
 // Another agent with registration enabled.
-type volsyncAgent struct {
+type VolSyncAgent struct {
 	addonClient      addonv1alpha1client.Interface
 	controllerClient client.Client
 }
 
-var _ agent.AgentAddon = &volsyncAgent{}
+func NewVolSyncAgent(addOnClient addonv1alpha1client.Interface, controllerClient client.Client) *VolSyncAgent {
+	return &VolSyncAgent{addOnClient, controllerClient}
+}
 
-func (h *volsyncAgent) Manifests(cluster *clusterv1.ManagedCluster,
+var _ agent.AgentAddon = &VolSyncAgent{}
+
+func (h *VolSyncAgent) Manifests(cluster *clusterv1.ManagedCluster,
 	addon *addonapiv1alpha1.ManagedClusterAddOn) ([]runtime.Object, error) {
 	if !clusterSupportsAddonInstall(cluster) {
 		klog.InfoS("Cluster is not OpenShift, not deploying addon", "addonName",
@@ -146,18 +117,16 @@ func (h *volsyncAgent) Manifests(cluster *clusterv1.ManagedCluster,
 		return []runtime.Object{}, nil
 	}
 
-	objects := []runtime.Object{}
-	for _, file := range getManifestFileList(addon) {
-		object, err := h.loadManifestFromFile(file, cluster, addon)
-		if err != nil {
-			return nil, err
-		}
-		objects = append(objects, object)
+	subscriptionObj, err := h.manifestObjectForVolsyncOperatorSubscription(cluster, addon)
+	if subscriptionObj == nil || err != nil {
+		return nil, err
 	}
-	return objects, nil
+
+	// List of objects for manifest  will just be the 1 VolSync operator subscription
+	return []runtime.Object{subscriptionObj}, nil
 }
 
-func (h *volsyncAgent) GetAgentAddonOptions() agent.AgentAddonOptions {
+func (h *VolSyncAgent) GetAgentAddonOptions() agent.AgentAddonOptions {
 	return agent.AgentAddonOptions{
 		AddonName: addonName,
 		//InstallStrategy: agent.InstallAllStrategy(operatorSuggestedNamespace),
@@ -177,7 +146,7 @@ func (h *volsyncAgent) GetAgentAddonOptions() agent.AgentAddonOptions {
 						ResourceIdentifier: workapiv1.ResourceIdentifier{
 							Group:     "operators.coreos.com",
 							Resource:  "subscriptions",
-							Name:      operatorName,
+							Name:      OperatorName,
 							Namespace: getInstallNamespace(),
 						},
 						ProbeRules: []workapiv1.FeedbackRule{
@@ -208,7 +177,7 @@ func subHealthCheck(identifier workapiv1.ResourceIdentifier, result workapiv1.St
 		if feedbackValue.Name == "installedCSV" {
 			klog.InfoS("Addon subscription", "installedCSV", feedbackValue.Value)
 			if feedbackValue.Value.Type != workapiv1.String || feedbackValue.Value.String == nil ||
-				!strings.HasPrefix(*feedbackValue.Value.String, operatorName) {
+				!strings.HasPrefix(*feedbackValue.Value.String, OperatorName) {
 
 				installedCSVErr := fmt.Errorf("addon subscription has unexpected installedCSV value")
 				klog.ErrorS(installedCSVErr, "Sub may not have installed CSV")
@@ -220,23 +189,21 @@ func subHealthCheck(identifier workapiv1.ResourceIdentifier, result workapiv1.St
 	return nil
 }
 
-func (h *volsyncAgent) loadManifestFromFile(file string, cluster *clusterv1.ManagedCluster,
+// returns the runtime.Object for the volsync operator subscription that should get embedded into a manifest
+func (h *VolSyncAgent) manifestObjectForVolsyncOperatorSubscription(cluster *clusterv1.ManagedCluster,
 	addon *addonapiv1alpha1.ManagedClusterAddOn) (runtime.Object, error) {
-
-	// Base values from defaults (or overridden by annotations on the ManagedClusterAddOn)
-	baseConfigValues := addonfactory.Values{
-		ConfigValue_OperatorName:           operatorName,
-		ConfigValue_InstallNamespace:       getInstallNamespace(),
-		ConfigValue_CatalogSource:          getCatalogSource(addon),
-		ConfigValue_CatalogSourceNamespace: getCatalogSourceNamespace(addon),
-		ConfigValue_InstallPlanApproval:    getInstallPlanApproval(addon),
-		ConfigValue_Channel:                getChannel(addon),
-		ConfigValue_StartingCSV:            getStartingCSV(addon),
+	// Get volsyncAddOnConfig if present (may be specified globally or per cluster)
+	vsAddOnConfig, err := h.getVolSyncAddOnConfig(addon)
+	if err != nil {
+		return nil, err
+	}
+	var vsAddOnConfigSpec *volsyncaddonv1alpha1.VolSyncAddOnConfigSpec
+	if vsAddOnConfig != nil {
+		vsAddOnConfigSpec = vsAddOnConfig.Spec
 	}
 
-	//
-	// Get values from addOnDeploymentConfig
-	//
+	// Get addOnDeploymentConfig if present (may be specified globally or per cluster)
+	// Getting the "values" here - we're concerned with NodeSelector and Tolerations
 	deploymentConfigValues, err := addonfactory.GetAddOnDeploymentConfigValues(
 		addonfactory.NewAddOnDeploymentConfigGetter(h.addonClient),
 		addonfactory.ToAddOnDeploymentConfigValues,
@@ -244,36 +211,48 @@ func (h *volsyncAgent) loadManifestFromFile(file string, cluster *clusterv1.Mana
 	if err != nil {
 		return nil, err
 	}
-	mergedValues := addonfactory.MergeValues(baseConfigValues, deploymentConfigValues)
 
-	// Especially if the config gets more complicated - consider just creating a subscription resource and
-	// replacing the values we want rather than dealing with the go template in controllers/manifests/operator-subscription.yaml
-	//
-	// Get values from volSyncAddOnConfig
-	//
-	volSyncAddOnConfigValues, err := getVolSyncAddOnConfigValues(h.controllerClient, addon)
-	if err != nil {
-		return nil, err
-	}
-	finalMergedValues := addonfactory.MergeValues(mergedValues, volSyncAddOnConfigValues)
-
-	template, err := fs.ReadFile(file)
+	volsyncOperatorSubscription, err := h.VolsyncOperatorSubscription(addon, vsAddOnConfigSpec, deploymentConfigValues)
 	if err != nil {
 		return nil, err
 	}
 
-	raw := assets.MustCreateAssetFromTemplate(file, template, &finalMergedValues).Data
-	object, _, err := genericCodec.Decode(raw, nil, nil)
-	if err != nil {
-		klog.ErrorS(err, "Error decoding manifest file", "filename", file)
-		return nil, err
+	// Note that the version/kind doesn't get set, so manually set it
+	gvks, _, _ := h.controllerClient.Scheme().ObjectKinds(volsyncOperatorSubscription)
+	for _, gvk := range gvks {
+		if gvk.Kind != "" && gvk.Version != "" {
+			volsyncOperatorSubscription.GetObjectKind().SetGroupVersionKind(gvk)
+			break
+		}
 	}
-	return object, nil
+
+	return volsyncOperatorSubscription, nil
 }
 
-func getVolSyncAddOnConfigValues(controllerClient client.Client,
-	addon *addonapiv1alpha1.ManagedClusterAddOn) (addonfactory.Values, error) {
-	var lastValues = addonfactory.Values{}
+func (h *VolSyncAgent) VolsyncOperatorSubscription(addon *addonapiv1alpha1.ManagedClusterAddOn,
+	vsAddOnConfigSpec *volsyncaddonv1alpha1.VolSyncAddOnConfigSpec,
+	deploymentConfigValues addonfactory.Values) (*operatorsv1alpha1.Subscription, error) {
+	// Operator Subscription
+	operatorSubscription := &operatorsv1alpha1.Subscription{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      OperatorName,
+			Namespace: getInstallNamespace(),
+		},
+		Spec: &operatorsv1alpha1.SubscriptionSpec{
+			Package:                OperatorName,
+			CatalogSource:          getCatalogSource(addon, vsAddOnConfigSpec),
+			CatalogSourceNamespace: getCatalogSourceNamespace(addon, vsAddOnConfigSpec),
+			Channel:                getChannel(addon, vsAddOnConfigSpec),
+			InstallPlanApproval:    getInstallPlanApproval(addon, vsAddOnConfigSpec),
+			StartingCSV:            getStartingCSV(addon, vsAddOnConfigSpec),
+			Config:                 getSubscriptionConfig(vsAddOnConfigSpec, deploymentConfigValues),
+		},
+	}
+
+	return operatorSubscription, nil
+}
+
+func (h *VolSyncAgent) getVolSyncAddOnConfig(addon *addonapiv1alpha1.ManagedClusterAddOn) (*volsyncaddonv1alpha1.VolSyncAddOnConfig, error) {
 	// If multiple volSyncAddOnConfigs, the last one in the list will take precedence
 	for _, config := range addon.Status.ConfigReferences {
 		if config.ConfigGroupResource.Group != volsyncaddonv1alpha1.GroupVersion.Group ||
@@ -282,121 +261,96 @@ func getVolSyncAddOnConfigValues(controllerClient client.Client,
 		}
 
 		vsAddOnConfig := &volsyncaddonv1alpha1.VolSyncAddOnConfig{}
-		if err := controllerClient.Get(context.Background(),
+		if err := h.controllerClient.Get(context.Background(),
 			types.NamespacedName{Name: config.Name, Namespace: config.Namespace}, vsAddOnConfig); err != nil {
 			return nil, err
 		}
-
-		values, err := volSyncAddOnConfigToValues(*vsAddOnConfig)
-		if err != nil {
-			return nil, err
-		}
-		lastValues = addonfactory.MergeValues(lastValues, values)
+		return vsAddOnConfig, nil
 	}
 
-	return lastValues, nil
-}
-
-func volSyncAddOnConfigToValues(vsAddOnConfig volsyncaddonv1alpha1.VolSyncAddOnConfig) (addonfactory.Values, error) {
-	subSpec := vsAddOnConfig.Spec
-	if subSpec == nil {
-		return addonfactory.Values{}, nil
-	}
-
-	valuesFromVSAddOnConfig := addonfactory.Values{}
-
-	setValueIfDefined(valuesFromVSAddOnConfig, ConfigValue_CatalogSource, subSpec.SubscriptionCatalogSource)
-	setValueIfDefined(valuesFromVSAddOnConfig, ConfigValue_CatalogSourceNamespace,
-		subSpec.SubscriptionCatalogSourceNamespace)
-	// Not allowing override of "Package"
-	setValueIfDefined(valuesFromVSAddOnConfig, ConfigValue_Channel, subSpec.SubscriptionChannel)
-	setValueIfDefined(valuesFromVSAddOnConfig, ConfigValue_StartingCSV, subSpec.SubscriptionStartingCSV)
-	setValueIfDefined(valuesFromVSAddOnConfig, ConfigValue_InstallPlanApproval, string(subSpec.SubscriptionInstallPlanApproval))
-
-	// Now look for overrides from subscriptionConfig (if defined)
-	subSpecConfig := subSpec.SubscriptionConfig
-	if subSpecConfig == nil {
-		// Then we're done, return
-		return valuesFromVSAddOnConfig, nil
-	}
-
-	subSpecConfigResources := subSpecConfig.Resources
-	if subSpecConfigResources != nil {
-		setValueIfDefined(valuesFromVSAddOnConfig, ConfigValue_ResourceRequests, subSpecConfigResources.Requests)
-		setValueIfDefined(valuesFromVSAddOnConfig, ConfigValue_ResourceLimits, subSpecConfigResources.Limits)
-	}
-
-	// These will override values in addonDeploymentConfig if specified
-	setValueIfDefined(valuesFromVSAddOnConfig, ConfigValue_Tolerations, subSpecConfig.Tolerations)
-	setValueIfDefined(valuesFromVSAddOnConfig, ConfigValue_NodeSelector, subSpecConfig.NodeSelector)
-
-	// Not currently doing any overrides on:
-	// - Resources.Claims
-	// - Selector
-	// - EnvFrom
-	// - Env
-	// - Volumes
-	// - VolumeMounts
-	// - Affinity
-
-	return valuesFromVSAddOnConfig, nil
-}
-
-// Update currentValues if value is not the empty value
-func setValueIfDefined(currentValues addonfactory.Values, valueName string, value interface{}) {
-	switch v := value.(type) {
-	case string:
-		if v != "" {
-			currentValues[valueName] = v
-		}
-	case corev1.ResourceList:
-		if v != nil {
-			currentValues[valueName] = v
-		}
-	case []corev1.Toleration:
-		if v != nil {
-			currentValues[valueName] = v
-		}
-	case map[string]string:
-		if v != nil {
-			currentValues[valueName] = v
-		}
-	}
-}
-
-func getManifestFileList(addon *addonapiv1alpha1.ManagedClusterAddOn) []string {
-	installNamespace := getInstallNamespace()
-	if installNamespace == globalOperatorInstallNamespace {
-		// Do not need to create an operator group, namespace etc if installing into the global operator ns
-		return manifestFilesAllNamespaces
-	}
-	return manifestFilesAllNamespacesInstallIntoSuggestedNamespace
+	return nil, nil
 }
 
 func getInstallNamespace() string {
 	// The only namespace supported is openshift-operators, so ignore whatever is in the spec
-	return globalOperatorInstallNamespace
+	return GlobalOperatorInstallNamespace
 }
 
-func getCatalogSource(addon *addonapiv1alpha1.ManagedClusterAddOn) string {
+// These getters will get the value from:
+// 1. The VolSyncAddonConfig if there is one.
+// 2. If not set, will fallback to getting it from the annotation on the ManagedClusterAddOn
+// 3. If still not set, will use the default value
+func getCatalogSource(addon *addonapiv1alpha1.ManagedClusterAddOn,
+	volSyncAddOnConfigSpec *volsyncaddonv1alpha1.VolSyncAddOnConfigSpec) string {
+	// Get value from volsyncaddonconfigspec if set
+	if volSyncAddOnConfigSpec != nil && volSyncAddOnConfigSpec.SubscriptionCatalogSource != "" {
+		return volSyncAddOnConfigSpec.SubscriptionCatalogSource
+	}
+	// Get value from the managedclusteraddon annotation next, or fallback to default value
 	return getAnnotationOverrideOrDefault(addon, AnnotationCatalogSourceOverride, DefaultCatalogSource)
 }
-
-func getCatalogSourceNamespace(addon *addonapiv1alpha1.ManagedClusterAddOn) string {
+func getCatalogSourceNamespace(addon *addonapiv1alpha1.ManagedClusterAddOn,
+	volSyncAddOnConfigSpec *volsyncaddonv1alpha1.VolSyncAddOnConfigSpec) string {
+	if volSyncAddOnConfigSpec != nil && volSyncAddOnConfigSpec.SubscriptionCatalogSourceNamespace != "" {
+		return volSyncAddOnConfigSpec.SubscriptionCatalogSourceNamespace
+	}
 	return getAnnotationOverrideOrDefault(addon, AnnotationCatalogSourceNamespaceOverride,
 		DefaultCatalogSourceNamespace)
 }
-
-func getInstallPlanApproval(addon *addonapiv1alpha1.ManagedClusterAddOn) string {
-	return getAnnotationOverrideOrDefault(addon, AnnotationInstallPlanApprovalOverride, DefaultInstallPlanApproval)
-}
-
-func getChannel(addon *addonapiv1alpha1.ManagedClusterAddOn) string {
+func getChannel(addon *addonapiv1alpha1.ManagedClusterAddOn,
+	volSyncAddOnConfigSpec *volsyncaddonv1alpha1.VolSyncAddOnConfigSpec) string {
+	if volSyncAddOnConfigSpec != nil && volSyncAddOnConfigSpec.SubscriptionChannel != "" {
+		return volSyncAddOnConfigSpec.SubscriptionChannel
+	}
 	return getAnnotationOverrideOrDefault(addon, AnnotationChannelOverride, DefaultChannel)
 }
-
-func getStartingCSV(addon *addonapiv1alpha1.ManagedClusterAddOn) string {
+func getInstallPlanApproval(addon *addonapiv1alpha1.ManagedClusterAddOn,
+	volSyncAddOnConfigSpec *volsyncaddonv1alpha1.VolSyncAddOnConfigSpec) operatorsv1alpha1.Approval {
+	if volSyncAddOnConfigSpec != nil &&
+		volSyncAddOnConfigSpec.SubscriptionInstallPlanApproval != nil &&
+		*volSyncAddOnConfigSpec.SubscriptionInstallPlanApproval != "" {
+		return *volSyncAddOnConfigSpec.SubscriptionInstallPlanApproval
+	}
+	return operatorsv1alpha1.Approval(
+		getAnnotationOverrideOrDefault(addon, AnnotationInstallPlanApprovalOverride, DefaultInstallPlanApproval))
+}
+func getStartingCSV(addon *addonapiv1alpha1.ManagedClusterAddOn,
+	volSyncAddOnConfigSpec *volsyncaddonv1alpha1.VolSyncAddOnConfigSpec) string {
+	if volSyncAddOnConfigSpec != nil && volSyncAddOnConfigSpec.SubscriptionStartingCSV != "" {
+		return volSyncAddOnConfigSpec.SubscriptionStartingCSV
+	}
 	return getAnnotationOverrideOrDefault(addon, AnnotationStartingCSVOverride, DefaultStartingCSV)
+}
+
+func getSubscriptionConfig(volSyncAddOnConfigSpec *volsyncaddonv1alpha1.VolSyncAddOnConfigSpec,
+	deploymentConfigValues addonfactory.Values) *operatorsv1alpha1.SubscriptionConfig {
+	var subscriptionConfig *operatorsv1alpha1.SubscriptionConfig
+
+	// Use settings from the volSyncAddOnConfig if set
+	if volSyncAddOnConfigSpec != nil && volSyncAddOnConfigSpec.SubscriptionConfig != nil {
+		subscriptionConfig = volSyncAddOnConfigSpec.SubscriptionConfig
+	}
+
+	// If nodeSelector or Tolerations are set in the deploymentConfig, then use these values instead
+	// of values in the volSyncAddOnConfig (deploymentConfig takes precedence)
+	if deploymentConfigValues != nil {
+		nodeSelectorFromDeploymentConfig, ok := deploymentConfigValues["NodeSelector"]
+		if ok && nodeSelectorFromDeploymentConfig != nil {
+			if subscriptionConfig == nil {
+				subscriptionConfig = &operatorsv1alpha1.SubscriptionConfig{}
+			}
+			subscriptionConfig.NodeSelector = nodeSelectorFromDeploymentConfig.(map[string]string)
+		}
+		tolerationsFromDeploymentConfig, ok := deploymentConfigValues["Tolerations"]
+		if ok && tolerationsFromDeploymentConfig != nil {
+			if subscriptionConfig == nil {
+				subscriptionConfig = &operatorsv1alpha1.SubscriptionConfig{}
+			}
+			subscriptionConfig.Tolerations = tolerationsFromDeploymentConfig.([]corev1.Toleration)
+		}
+	}
+
+	return subscriptionConfig
 }
 
 func getAnnotationOverrideOrDefault(addon *addonapiv1alpha1.ManagedClusterAddOn,
@@ -433,7 +387,7 @@ func StartControllers(ctx context.Context, config *rest.Config) error {
 	if err != nil {
 		return err
 	}
-	err = mgr.AddAgent(&volsyncAgent{addonClient, controllerClient})
+	err = mgr.AddAgent(&VolSyncAgent{addonClient, controllerClient})
 	if err != nil {
 		return err
 	}

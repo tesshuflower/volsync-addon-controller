@@ -34,12 +34,18 @@ type VolSyncAddOnConfigList struct {
 }
 
 type VolSyncAddOnConfigSpec struct {
-	SubscriptionCatalogSource          string                                `json:"subscriptionSource,omitempty"`
-	SubscriptionCatalogSourceNamespace string                                `json:"subscriptionSourceNamespace,omitempty"`
-	SubscriptionChannel                string                                `json:"subscriptionChannel,omitempty"`
-	SubscriptionStartingCSV            string                                `json:"subscriptionStartingCSV,omitempty"`
-	SubscriptionInstallPlanApproval    operatorsv1alpha1.Approval            `json:"subscriptionInstallPlanApproval,omitempty"`
-	SubscriptionConfig                 *operatorsv1alpha1.SubscriptionConfig `json:"subscriptionConfig,omitempty"`
+	//+optional
+	SubscriptionCatalogSource string `json:"subscriptionSource,omitempty"`
+	//+optional
+	SubscriptionCatalogSourceNamespace string `json:"subscriptionSourceNamespace,omitempty"`
+	//+optional
+	SubscriptionChannel string `json:"subscriptionChannel,omitempty"`
+	//+optional
+	SubscriptionStartingCSV string `json:"subscriptionStartingCSV,omitempty"`
+	//+optional
+	SubscriptionInstallPlanApproval *operatorsv1alpha1.Approval `json:"subscriptionInstallPlanApproval,omitempty"`
+	//+optional
+	SubscriptionConfig *operatorsv1alpha1.SubscriptionConfig `json:"subscriptionConfig,omitempty"`
 }
 
 func init() {
