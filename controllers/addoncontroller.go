@@ -22,6 +22,7 @@ import (
 	addonv1alpha1client "open-cluster-management.io/api/client/addon/clientset/versioned"
 	clusterv1 "open-cluster-management.io/api/cluster/v1"
 	workapiv1 "open-cluster-management.io/api/work/v1"
+	appsubscriptionv1 "open-cluster-management.io/multicloud-operators-subscription/pkg/apis/apps/v1"
 )
 
 //
@@ -48,6 +49,10 @@ const (
 	DefaultChannel                = "stable-0.11" // No "acm-x.y" channel anymore - aligning ACM-2.12 with stable-0.11
 	DefaultStartingCSV            = ""            // By default no starting CSV - will use the latest in the channel
 	DefaultInstallPlanApproval    = "Automatic"
+
+	DefaultHelmSource         = "https://backube.github.io/helm-charts"
+	DefaultHelmChartName      = "volsync"
+	DefaultHelmPackageVersion = "0.10" //FIXME: update
 )
 
 const (
@@ -69,34 +74,35 @@ func init() {
 	utilruntime.Must(scheme.AddToScheme(genericScheme))
 	utilruntime.Must(operatorsv1.AddToScheme(genericScheme))
 	utilruntime.Must(operatorsv1alpha1.AddToScheme(genericScheme))
+	utilruntime.Must(appsubscriptionv1.SchemeBuilder.AddToScheme(genericScheme))
 }
 
 //go:embed manifests
 var fs embed.FS
 
+/*
 // If operator is deployed to a single namespace, the Namespace, OperatorGroup (and role to create the operatorgroup)
 // is required, along with the Subscription for the operator
 // This particular operator is deploying into all namespaces, but into a specific target namespace
 // (Requires the annotation  operatorframework.io/suggested-namespace: "mynamespace"  to be set on the operator CSV)
 var manifestFilesAllNamespacesInstallIntoSuggestedNamespace = []string{
-	"manifests/operatorgroup-aggregate-clusterrole.yaml",
-	"manifests/operator-namespace.yaml",
-	"manifests/operator-group-allnamespaces.yaml",
-	"manifests/operator-subscription.yaml",
+	"manifests/operator/operatorgroup-aggregate-clusterrole.yaml",
+	"manifests/operator/operator-namespace.yaml",
+	"manifests/operator/operator-group-allnamespaces.yaml",
+	"manifests/operator/operator-subscription.yaml",
 }
-
-// Use these manifest files if deploying an operator into own namespace
-//var manifestFilesOwnNamepace = []string{
-//	"manifests/operatorgroup-aggregate-clusterrole.yaml",
-//	"manifests/operator-namespace.yaml",
-//	"manifests/operator-group-ownnamespace.yaml",
-//	"manifests/operator-subscription.yaml",
-//}
+*/
 
 // If operator is deployed to a all namespaces and the operator wil be deployed into the global operators namespace
 // (openshift-operators on OCP), the only thing needed is the Subscription for the operator
 var manifestFilesAllNamespaces = []string{
-	"manifests/operator-subscription.yaml",
+	"manifests/operator/operator-subscription.yaml",
+}
+
+var manifestFilesHelmChartInstall = []string{
+	"manifests/helm-chart/namespace.yaml",
+	"manifests/helm-chart/subscription.yaml",
+	//FIXME:how to handle the channel?  "manifests/helm-chart/
 }
 
 // Another agent with registration enabled.
@@ -109,18 +115,24 @@ var _ agent.AgentAddon = &volsyncAgent{}
 func (h *volsyncAgent) Manifests(cluster *clusterv1.ManagedCluster,
 	addon *addonapiv1alpha1.ManagedClusterAddOn,
 ) ([]runtime.Object, error) {
-	if !clusterSupportsAddonInstall(cluster) {
-		klog.InfoS("Cluster is not OpenShift, not deploying addon", "addonName",
-			addonName, "cluster", cluster.GetName())
-		return []runtime.Object{}, nil
-	}
+	/*
+		if !clusterSupportsAddonInstall(cluster) {
+			klog.InfoS("Cluster is not OpenShift, not deploying addon", "addonName",
+				addonName, "cluster", cluster.GetName())
+			return []runtime.Object{}, nil
+		}
+	*/
+
+	isClusterOpenShift := isOpenShift(cluster)
 
 	objects := []runtime.Object{}
-	for _, file := range getManifestFileList(addon) {
-		object, err := h.loadManifestFromFile(file, cluster, addon)
+	for _, file := range getManifestFileList(addon, isClusterOpenShift) {
+		klog.InfoS("File for manifest: ", "file name", file) //TODO: remove
+		object, err := h.loadManifestFromFile(file, addon, cluster, isClusterOpenShift)
 		if err != nil {
 			return nil, err
 		}
+		klog.InfoS("Object for manifest: ", "object", object) //TODO: remove
 		objects = append(objects, object)
 	}
 	return objects, nil
@@ -130,15 +142,17 @@ func (h *volsyncAgent) GetAgentAddonOptions() agent.AgentAddonOptions {
 	return agent.AgentAddonOptions{
 		AddonName: addonName,
 		HealthProber: &agent.HealthProber{
+			//FIXME: how to do this for the helm chart?
 			Type: agent.HealthProberTypeWork,
 			WorkProber: &agent.WorkHealthProber{
 				ProbeFields: []agent.ProbeField{
 					{
 						ResourceIdentifier: workapiv1.ResourceIdentifier{
-							Group:     "operators.coreos.com",
-							Resource:  "subscriptions",
-							Name:      operatorName,
-							Namespace: getInstallNamespace(),
+							Group:    "operators.coreos.com",
+							Resource: "subscriptions",
+							Name:     operatorName,
+							//Namespace: getInstallNamespace(),
+							Namespace: "openshift-operators", //FIXME:
 						},
 						ProbeRules: []workapiv1.FeedbackRule{
 							{
@@ -179,26 +193,38 @@ func subHealthCheck(identifier workapiv1.ResourceIdentifier, result workapiv1.St
 	return nil
 }
 
-func (h *volsyncAgent) loadManifestFromFile(file string, cluster *clusterv1.ManagedCluster,
-	addon *addonapiv1alpha1.ManagedClusterAddOn,
+func (h *volsyncAgent) loadManifestFromFile(file string, addon *addonapiv1alpha1.ManagedClusterAddOn,
+	cluster *clusterv1.ManagedCluster, isClusterOpenShift bool,
 ) (runtime.Object, error) {
 	manifestConfig := struct {
+		InstallNamespace string
+
+		// OpenShift target cluster parameters - for OLM operator install of VolSync
 		OperatorName           string
-		InstallNamespace       string
 		OperatorGroupSpec      string
 		CatalogSource          string
 		CatalogSourceNamespace string
 		InstallPlanApproval    string
 		Channel                string
 		StartingCSV            string
+
+		// Helm based install parameters for non-OpenShift target clusters
+		HelmSource         string
+		HelmChartName      string
+		HelmPackageVersion string
 	}{
+		InstallNamespace: getInstallNamespace(addon, isClusterOpenShift),
+
 		OperatorName:           operatorName,
-		InstallNamespace:       getInstallNamespace(),
 		CatalogSource:          getCatalogSource(addon),
 		CatalogSourceNamespace: getCatalogSourceNamespace(addon),
 		InstallPlanApproval:    getInstallPlanApproval(addon),
 		Channel:                getChannel(addon),
 		StartingCSV:            getStartingCSV(addon),
+
+		HelmSource:         getHelmSource(addon),
+		HelmChartName:      getHelmChartName(addon),
+		HelmPackageVersion: getHelmPackageVersion(addon),
 	}
 
 	manifestConfigValues := addonfactory.StructToValues(manifestConfig)
@@ -229,18 +255,36 @@ func (h *volsyncAgent) loadManifestFromFile(file string, cluster *clusterv1.Mana
 	return object, nil
 }
 
-func getManifestFileList(_ *addonapiv1alpha1.ManagedClusterAddOn) []string {
-	installNamespace := getInstallNamespace()
-	if installNamespace == globalOperatorInstallNamespace {
-		// Do not need to create an operator group, namespace etc if installing into the global operator ns
+func getManifestFileList(_ *addonapiv1alpha1.ManagedClusterAddOn, isClusterOpenShift bool) []string {
+	if isClusterOpenShift {
+		/*
+				installNamespace := getInstallNamespace()
+				if installNamespace == globalOperatorInstallNamespace {
+					//TODO: remove this old stuff
+					// Do not need to create an operator group, namespace etc if installing into the global operator ns
+					return manifestFilesAllNamespaces
+				}
+			return manifestFilesAllNamespacesInstallIntoSuggestedNamespace
+		*/
 		return manifestFilesAllNamespaces
 	}
-	return manifestFilesAllNamespacesInstallIntoSuggestedNamespace
+
+	// Non OpenShift cluster - use manifestwork containing helm chart namespace/subscription
+	return manifestFilesHelmChartInstall
 }
 
-func getInstallNamespace() string {
-	// The only namespace supported is openshift-operators, so ignore whatever is in the spec
-	return globalOperatorInstallNamespace
+func getInstallNamespace(addon *addonapiv1alpha1.ManagedClusterAddOn, isClusterOpenShift bool) string {
+	if isClusterOpenShift {
+		// The only namespace supported is openshift-operators, so ignore whatever is in the spec
+		return globalOperatorInstallNamespace
+	}
+
+	// non-OpenShift target cluster
+	installNamespace := "volsync-system" // Default value //TODO: make a constant
+	if addon.Spec.InstallNamespace != "" && addon.Spec.InstallNamespace != "default" {
+		installNamespace = addon.Spec.InstallNamespace
+	}
+	return installNamespace
 }
 
 func getCatalogSource(addon *addonapiv1alpha1.ManagedClusterAddOn) string {
@@ -264,6 +308,20 @@ func getStartingCSV(addon *addonapiv1alpha1.ManagedClusterAddOn) string {
 	return getAnnotationOverrideOrDefault(addon, AnnotationStartingCSVOverride, DefaultStartingCSV)
 }
 
+func getHelmSource(_ *addonapiv1alpha1.ManagedClusterAddOn) string {
+	//TODO: allow overriding with annotations?
+	return DefaultHelmSource
+}
+
+func getHelmChartName(_ *addonapiv1alpha1.ManagedClusterAddOn) string {
+	return DefaultHelmChartName
+}
+
+func getHelmPackageVersion(_ *addonapiv1alpha1.ManagedClusterAddOn) string {
+	//TODO: allow overriding with annotations?
+	return DefaultHelmPackageVersion
+}
+
 func getAnnotationOverrideOrDefault(addon *addonapiv1alpha1.ManagedClusterAddOn,
 	annotationName, defaultValue string,
 ) string {
@@ -275,10 +333,19 @@ func getAnnotationOverrideOrDefault(addon *addonapiv1alpha1.ManagedClusterAddOn,
 	return defaultValue
 }
 
-func clusterSupportsAddonInstall(cluster *clusterv1.ManagedCluster) bool {
+func isOpenShift(cluster *clusterv1.ManagedCluster) bool {
 	vendor, ok := cluster.Labels["vendor"]
 	if !ok || !strings.EqualFold(vendor, "OpenShift") {
 		return false
 	}
+
+	//FIXME: this is just for test purposes
+	_, notOS := cluster.Labels["notopenshift"]
+	if notOS {
+		klog.InfoS("Cluster has our fake notopenshift label", "cluster name", cluster.GetName())
+		return false
+	}
+	//end FIXME: this is just for test purposes
+
 	return true
 }

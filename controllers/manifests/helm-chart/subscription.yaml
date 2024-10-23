@@ -1,0 +1,17 @@
+apiVersion: apps.open-cluster-management.io/v1
+kind: Subscription
+metadata:
+  name: {{ .OperatorName }}
+  namespace: {{ .InstallNamespace }}
+  #labels:
+  #  apps.open-cluster-management.io/reconcile-rate: medium # TODO: necessary?
+spec:
+  name: {{ .HelmChartName }}
+  source: {{ .HelmSource }}
+  packageFilter:
+    version: "{{ .HelmPackageVersion }}"
+  packageOverrides:
+  - packageAlias: {{ .HelmChartName }}
+    packageName: {{ .HelmChartName }}
+  placement:
+    local: true
