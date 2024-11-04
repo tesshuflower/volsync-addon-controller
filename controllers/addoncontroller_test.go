@@ -1372,6 +1372,42 @@ var _ = Describe("Addon Status Update Tests", func() {
 				}, timeout, interval).Should(Succeed())
 			})
 
+			Context("When the managed cluster is not OpenShift", func() {
+				BeforeEach(func() {
+					// Delete label that indicates the mgd cluster is openshift
+					delete(testManagedCluster.Labels, "vendor")
+				})
+
+				It("Should create a manifestwork containing helm charts", func() {
+					// The controller should create a ManifestWork for this ManagedClusterAddon
+					// Fake out that the ManifestWork is applied and available
+					Eventually(func() error {
+						var manifestWork *workv1.ManifestWork
+
+						allMwList := &workv1.ManifestWorkList{}
+						Expect(testK8sClient.List(testCtx, allMwList,
+							client.InNamespace(testManagedCluster.GetName()))).To(Succeed())
+
+						for _, mw := range allMwList.Items {
+							if strings.HasPrefix(mw.GetName(), "addon-volsync-deploy") == true {
+								manifestWork = &mw
+								break
+							}
+						}
+
+						if manifestWork == nil {
+							return fmt.Errorf("Did not find the manifestwork with prefix addon-volsync-deploy")
+						}
+
+						logger.Info("manifestWork", "manifestWork", manifestWork)
+
+						//TODO: check contents of manifestwork
+
+						return nil
+					}, timeout, interval).Should(Succeed())
+				})
+			})
+
 			Context("When the managed cluster is an OpenShiftCluster and manifestwork is available", func() {
 				JustBeforeEach(func() {
 					// The controller should create a ManifestWork for this ManagedClusterAddon
