@@ -11,6 +11,8 @@ import (
 	"github.com/openshift/library-go/pkg/assets"
 	operatorsv1 "github.com/operator-framework/api/pkg/operators/v1"
 	operatorsv1alpha1 "github.com/operator-framework/api/pkg/operators/v1alpha1"
+	"github.com/stolostron/volsync-addon-controller/controllers/helmutils"
+	"helm.sh/helm/v3/pkg/chart"
 	"helm.sh/helm/v3/pkg/chart/loader"
 	"helm.sh/helm/v3/pkg/chartutil"
 	"helm.sh/helm/v3/pkg/engine"
@@ -131,13 +133,19 @@ var manifestFilesHelmChartInstallEmbedded = []string{
 	"manifests/helm-chart/namespace.yaml",
 }
 
+// List of kinds of objects in the manifestwork - anything in this list will not have
+// the namespace updated before adding to the manifestwork
 var globalKinds = []string{
 	"CustomResourceDefinition",
 	"ClusterRole",
 	"ClusterRoleBinding",
 }
 
-var helmChartInstallType = "embedded" //FIXME: remove - just for testing different ways
+const crdKind = "CustomResourceDefinition"
+
+// var helmChartInstallType = "embedded"
+var helmChartInstallType = "embedded-tgz" //FIXME: remove - just for testing different ways
+//var helmChartInstallType = "helm-remote-repo" //FIXME: remove - just for testing different ways
 
 // Another agent with registration enabled.
 type volsyncAgent struct {
@@ -178,15 +186,21 @@ func (h *volsyncAgent) Manifests(cluster *clusterv1.ManagedCluster,
 		objects = append(objects, object)
 	}
 
+	var helmObjs []runtime.Object
 	if helmChartDir != "" {
+		// THis is the prototype of using embedded (chart yaml files packaged locally)
 		// we have a helm chart to render into objects
 		//TODO:
-		helmObjs, err := h.loadManifestsFromHelmChartsDir(helmChartDir, values, cluster)
-		if err != nil {
-			return nil, err
-		}
-		objects = append(objects, helmObjs...)
+		helmObjs, err = h.loadManifestsFromHelmChartsDir(helmChartDir, values, cluster)
+	} else {
+		// This is the embeded tgz option - or possibly getting the chart from a remote helm repo
+		helmObjs, err = h.loadManifestsFromHelmRepo(values, cluster)
 	}
+
+	if err != nil {
+		return nil, err
+	}
+	objects = append(objects, helmObjs...)
 
 	return objects, nil
 }
@@ -378,8 +392,6 @@ func (h *volsyncAgent) loadManifestFromFile(file string, values addonfactory.Val
 }
 
 // TODO: move this to some helm pkg?
-//
-//nolint:funlen
 func (h *volsyncAgent) loadManifestsFromHelmChartsDir(chartsDir string, values addonfactory.Values,
 	cluster *clusterv1.ManagedCluster,
 ) ([]runtime.Object, error) {
@@ -391,6 +403,37 @@ func (h *volsyncAgent) loadManifestsFromHelmChartsDir(chartsDir string, values a
 		return nil, err
 	}
 
+	return h.renderManifestsFromChart(chart, values, cluster)
+}
+
+// This is the prototype way of using either an embedded chart tgz in the image (i.e. local filesystem)
+// or from a remote helm repo
+func (h *volsyncAgent) loadManifestsFromHelmRepo(values addonfactory.Values, cluster *clusterv1.ManagedCluster,
+) ([]runtime.Object, error) {
+	chartName := values["HelmChartName"].(string)
+	desiredVolSyncVersion := values["HelmPackageVersion"].(string)
+
+	var chart *chart.Chart
+	var err error
+	if helmChartInstallType == "embedded-tgz" { //FIXME: this is just for quick prototyping - need to specify somewhere
+		chart, err = helmutils.EnsureEmbeddedChart(chartName, desiredVolSyncVersion)
+	} else {
+		helmRepoUrl := values["HelmSource"].(string)
+		chart, err = helmutils.EnsureLocalChart(helmRepoUrl, chartName, desiredVolSyncVersion, false)
+	}
+
+	if err != nil {
+		klog.ErrorS(err, "unable to load or render chart")
+		return nil, err
+	}
+
+	return h.renderManifestsFromChart(chart, values, cluster)
+}
+
+//nolint:funlen
+func (h volsyncAgent) renderManifestsFromChart(chart *chart.Chart, values addonfactory.Values,
+	cluster *clusterv1.ManagedCluster,
+) ([]runtime.Object, error) {
 	helmObjs := []runtime.Object{}
 
 	// This only loads crds from the crds/ dir - consider putting them in that format upstream?
@@ -424,7 +467,7 @@ func (h *volsyncAgent) loadManifestsFromHelmChartsDir(chartsDir string, values a
 
 	chartValues, err := chartutil.ToRenderValues(chart, values, releaseOptions, capabilities)
 	if err != nil {
-		klog.Error(err, "Unable to render values for chart", "chartsDir", chartsDir)
+		klog.Error(err, "Unable to render values for chart", "chart.Name()", chart.Name())
 		return nil, err
 	}
 
@@ -434,11 +477,11 @@ func (h *volsyncAgent) loadManifestsFromHelmChartsDir(chartsDir string, values a
 
 	templates, err := helmEngine.Render(chart, chartValues)
 	if err != nil {
-		klog.Error(err, "Unable to render chart", "chartsDir", chartsDir)
+		klog.Error(err, "Unable to render chart", "chart.Name()", chart.Name())
 		return nil, err
 	}
 
-	//klog.InfoS("### Chart templates after render ###", "templates", templates) //TODO: remove
+	//TODO: can we update the manifest to tell it not to cleanup CRDs when we delete?
 
 	// sort the filenames of the templates so the manifests are ordered consistently
 	keys := make([]string, len(templates))
@@ -467,11 +510,21 @@ func (h *volsyncAgent) loadManifestsFromHelmChartsDir(chartsDir string, values a
 			return nil, err
 		}
 
-		if gvk != nil && !slices.Contains(globalKinds, gvk.Kind) {
-			// Helm rendering does not set namespace on the templates, it will rely on the kubectl install/apply
-			// to do it (which does not happen since these objects end up directly in our manifestwork).
-			// So set the namespace ourselves for any object with kind not in our globalKinds list
-			templateObj.(metav1.Object).SetNamespace(releaseOptions.Namespace)
+		if gvk != nil {
+			if !slices.Contains(globalKinds, gvk.Kind) {
+				// Helm rendering does not set namespace on the templates, it will rely on the kubectl install/apply
+				// to do it (which does not happen since these objects end up directly in our manifestwork).
+				// So set the namespace ourselves for any object with kind not in our globalKinds list
+				templateObj.(metav1.Object).SetNamespace(releaseOptions.Namespace)
+			}
+
+			if gvk.Kind == crdKind {
+				// Add annotation to indicate we do not want the CRD deleted when the manifestwork is deleted
+				// (i.e. when the managedclusteraddon is deleted)
+				crdAnnotations := templateObj.(metav1.Object).GetAnnotations()
+				crdAnnotations[addonapiv1alpha1.DeletionOrphanAnnotationKey] = ""
+				templateObj.(metav1.Object).SetAnnotations(crdAnnotations)
+			}
 		}
 
 		helmObjs = append(helmObjs, templateObj)
@@ -503,14 +556,17 @@ func getManifestFileList(_ *addonapiv1alpha1.ManagedClusterAddOn, isClusterOpenS
 	} else if helmChartInstallType == "appsub" {
 		klog.InfoS("Installing volsync helm chart via appsub")
 		return manifestFilesHelmChartInstallAppSub, ""
+	} else if helmChartInstallType == "embedded" {
+		klog.InfoS("Installing volsync helm chart via embedded charts")
+		//helmChartDir := "manifests/helm-chart/stable-0.11/volsync" //TODO: look this up based on desired version requested
+		// Using local dir for quick test
+		helmChartDir :=
+			"/Users/tflower/DEV/tesshuflower/volsync-addon-controller/controllers/manifests/helm-chart/stable-0.11/volsync"
+		return manifestFilesHelmChartInstallEmbedded, helmChartDir
 	}
 
-	klog.InfoS("Installing volsync helm chart via embedded charts")
-	//helmChartDir := "manifests/helm-chart/stable-0.11/volsync" //TODO: look this up based on desired version requested
-	// Using local dir for quick test
-	helmChartDir :=
-		"/Users/tflower/DEV/tesshuflower/volsync-addon-controller/controllers/manifests/helm-chart/stable-0.11/volsync"
-	return manifestFilesHelmChartInstallEmbedded, helmChartDir
+	klog.InfoS("Installing volsync helm chart via embedded repo with tgz and index.html or remote repo")
+	return manifestFilesHelmChartInstallEmbedded, ""
 }
 
 func getOperatorInstallNamespace(_ *addonapiv1alpha1.ManagedClusterAddOn, isClusterOpenShift bool) string {
