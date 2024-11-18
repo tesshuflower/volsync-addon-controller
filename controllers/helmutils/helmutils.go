@@ -23,6 +23,11 @@ const (
 	localRepoDir            = "/tmp/helmrepos" // FIXME: mount memory pvc to put files outside of /tmp
 	localRepoCacheDir       = localRepoDir + "/.cache/helm/repository"
 	localRepoConfigFileName = localRepoDir + "/.config/helm/repositories.yaml"
+
+	//FIXME: don't hardcode this here
+	embeddedChartsDir = "/Users/tflower/DEV/tesshuflower/volsync-addon-controller/controllers/manifests/helm-chart/charts/"
+	//FIXME: where to embed this file?  If embedded need to save to /tmp/ somewhere?
+	localEmbeddedIndexFileFullPath = embeddedChartsDir + "index.yaml"
 )
 
 //var volsyncRepoURL = "https://tesshuflower.github.io/helm-charts/" //TODO: set default somewhere, allow overriding
@@ -50,12 +55,6 @@ func loadLocalRepoConfig() (*repo.File, error) {
 		klog.InfoS("Initialized local repo file", "localRepoConfigFile", localRepoConfigFileName)
 	}
 
-	/*
-		  if len(f.Repositories) == 0 {
-						return errors.New("no repositories to show")
-					}
-	*/
-
 	return repoConfigFile, nil
 }
 
@@ -72,7 +71,7 @@ func getChartRef(repoUrl string, chartName string) string {
 // Lock (on writing/downloading/updating local repository charts & info)
 var lock sync.Mutex
 
-// Creates local repo if it doesn't exist
+// Creates local repo definition if it doesn't exist
 // If it exists already, update it if update=true
 func EnsureLocalRepo(repoUrl string, update bool) error {
 	lock.Lock()
@@ -144,32 +143,28 @@ var embeddedHelmIndexOnce sync.Once
 
 // Only load our embedded index once (index we package in the volsync-addon-controller img), and then
 // save in var localEmbeddedIndexFile
-func loadEmbeddedHelmIndexFile(indexFileFullPath string) (*repo.IndexFile, error) {
-	var indexFile *repo.IndexFile
-	var err error
+func LoadEmbeddedHelmIndexFile() (*repo.IndexFile, error) {
 	embeddedHelmIndexOnce.Do(func() {
-		indexFile, err = repo.LoadIndexFile(indexFileFullPath)
+		indexFile, err := repo.LoadIndexFile(localEmbeddedIndexFileFullPath)
+		if err != nil {
+			klog.ErrorS(err, "Unable to load index file", "localEmbeddedIndexFileFullPath", localEmbeddedIndexFileFullPath)
+		}
+
+		// Save in memory so we don't keep reloading this embedded index
+		localEmbeddedIndexFile = indexFile
+
+		klog.InfoS("Loaded embedded helm chart index", "localEmbeddedIndexFileFullPath", localEmbeddedIndexFileFullPath)
 	})
 
-	if err != nil {
-		return nil, err
-		//TODO: consider calling this 1x from main.go and panicking if it fails
+	if localEmbeddedIndexFile == nil {
+		return nil, fmt.Errorf("Unable to load index file: %s", localEmbeddedIndexFileFullPath)
 	}
-	// Save in memory so we don't keep reloading this embedded index
-	localEmbeddedIndexFile = indexFile
-
 	return localEmbeddedIndexFile, nil
 }
 
 func EnsureEmbeddedChart(chartName, version string) (*chart.Chart, error) {
 	//TODO: locking, ensure local chart etc
-	//FIXME: don't hardcode this here
-	embeddedChartsDir :=
-		"/Users/tflower/DEV/tesshuflower/volsync-addon-controller/controllers/manifests/helm-chart/charts/"
-	//FIXME: where to embed this file?  If embedded need to save to /tmp/ somewhere?
-	indexFileFullPath := embeddedChartsDir + "index.yaml"
-
-	indexFile, err := loadEmbeddedHelmIndexFile(indexFileFullPath)
+	indexFile, err := LoadEmbeddedHelmIndexFile()
 	if err != nil {
 		return nil, err
 	}

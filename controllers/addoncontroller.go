@@ -65,7 +65,7 @@ const (
 	DefaultHelmSource                   = "https://backube.github.io/helm-charts"
 	DefaultHelmChartName                = "volsync"
 	DefaultHelmOperatorInstallNamespace = "volsync-system"
-	DefaultHelmPackageVersion           = "0.10" //FIXME: update
+	DefaultHelmPackageVersion           = "^0.10" //FIXME: update
 )
 
 const (
