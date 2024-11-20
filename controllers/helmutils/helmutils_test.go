@@ -10,32 +10,29 @@ import (
 var _ = Describe("Helmutils", func() {
 	var volsyncRepoURL = "https://tesshuflower.github.io/helm-charts/"
 
-	//FIXME:remove F
-	FIt("Should EnsureLocalRepo", func() {
+	It("Should EnsureLocalRepo", func() {
 		Expect(helmutils.EnsureLocalRepo(volsyncRepoURL, true)).To(Succeed())
 
-		chart, err := helmutils.EnsureEmbeddedChart("0.10")
+		chart, err := helmutils.EnsureEmbeddedChart(helmutils.VolsyncChartName, "0.10")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(chart).NotTo(BeNil())
 
-		chart, err = helmutils.EnsureEmbeddedChart("0.10")
+		chart, err = helmutils.EnsureEmbeddedChart(helmutils.VolsyncChartName, "0.10")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(chart).NotTo(BeNil())
 
-		chart, err = helmutils.EnsureEmbeddedChart(">0.11.0-0")
+		chart, err = helmutils.EnsureEmbeddedChart(helmutils.VolsyncChartName, ">0.11.0-0")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(chart).NotTo(BeNil())
-
-		Expect("A").To(Equal("B"))
 	})
 
 	It("Should EnsureLocalChart", func() {
 		version := "0.11.0-rc.1"
-		chart, err := helmutils.EnsureLocalChart(volsyncRepoURL, version, false)
+		chart, err := helmutils.EnsureLocalChart(volsyncRepoURL, helmutils.VolsyncChartName, version, false)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(chart).NotTo(BeNil())
 
-		chart2, err := helmutils.EnsureLocalChart(volsyncRepoURL, version, false)
+		chart2, err := helmutils.EnsureLocalChart(volsyncRepoURL, helmutils.VolsyncChartName, version, false)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(chart2).NotTo(BeNil())
 	})

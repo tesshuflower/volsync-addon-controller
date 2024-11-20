@@ -3,22 +3,12 @@ package controllers
 import (
 	"embed"
 	"fmt"
-	"path/filepath"
-	"slices"
-	"sort"
 	"strings"
 
-	"github.com/openshift/library-go/pkg/assets"
 	operatorsv1 "github.com/operator-framework/api/pkg/operators/v1"
 	operatorsv1alpha1 "github.com/operator-framework/api/pkg/operators/v1alpha1"
-	"github.com/stolostron/volsync-addon-controller/controllers/helmutils"
-	"helm.sh/helm/v3/pkg/chart"
-	"helm.sh/helm/v3/pkg/chart/loader"
-	"helm.sh/helm/v3/pkg/chartutil"
-	"helm.sh/helm/v3/pkg/engine"
 	appsv1 "k8s.io/api/apps/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
@@ -55,13 +45,14 @@ const (
 	operatorName                   = "volsync-product"
 	globalOperatorInstallNamespace = "openshift-operators"
 
-	// Defaults for ACM-2.12
+	// Defaults for ACM-2.12 Operator deploy
 	DefaultCatalogSource          = "redhat-operators"
 	DefaultCatalogSourceNamespace = "openshift-marketplace"
 	DefaultChannel                = "stable-0.11" // No "acm-x.y" channel anymore - aligning ACM-2.12 with stable-0.11
 	DefaultStartingCSV            = ""            // By default no starting CSV - will use the latest in the channel
 	DefaultInstallPlanApproval    = "Automatic"
 
+	// Defaults for ACM-2.13 helm-based deploy
 	DefaultHelmSource                   = "https://backube.github.io/helm-charts"
 	DefaultHelmChartName                = "volsync"
 	DefaultHelmOperatorInstallNamespace = "volsync-system"
@@ -74,13 +65,20 @@ const (
 	// trigger the deployment of the volsync operator on that managed cluster
 	ManagedClusterInstallVolSyncLabel      = "addons.open-cluster-management.io/volsync"
 	ManagedClusterInstallVolSyncLabelValue = "true"
+)
 
+const (
 	// Annotations on the ManagedClusterAddOn for overriding operator settings (in the operator Subscription)
 	AnnotationChannelOverride                = "operator-subscription-channel"
 	AnnotationInstallPlanApprovalOverride    = "operator-subscription-installPlanApproval"
 	AnnotationCatalogSourceOverride          = "operator-subscription-source"
 	AnnotationCatalogSourceNamespaceOverride = "operator-subscription-sourceNamespace"
 	AnnotationStartingCSVOverride            = "operator-subscription-startingCSV"
+)
+
+const (
+	AnnotationVolSyncAddonDeployTypeOverride          = "volsync-addon-deploy-type"
+	AnnotationVolSyncAddonDeployTypeOverrideHelmValue = "helm"
 )
 
 func init() {
@@ -95,25 +93,18 @@ func init() {
 //go:embed manifests
 var embedFS embed.FS
 
-/*
-// If operator is deployed to a single namespace, the Namespace, OperatorGroup (and role to create the operatorgroup)
-// is required, along with the Subscription for the operator
-// This particular operator is deploying into all namespaces, but into a specific target namespace
-// (Requires the annotation  operatorframework.io/suggested-namespace: "mynamespace"  to be set on the operator CSV)
-var manifestFilesAllNamespacesInstallIntoSuggestedNamespace = []string{
-	"manifests/operator/operatorgroup-aggregate-clusterrole.yaml",
-	"manifests/operator/operator-namespace.yaml",
-	"manifests/operator/operator-group-allnamespaces.yaml",
-	"manifests/operator/operator-subscription.yaml",
-}
-*/
-
 // If operator is deployed to a all namespaces and the operator wil be deployed into the global operators namespace
 // (openshift-operators on OCP), the only thing needed is the Subscription for the operator
-var manifestFilesAllNamespaces = []string{
+var manifestFilesOperatorDeploy = []string{
 	"manifests/operator/operator-subscription.yaml",
 }
 
+var manifestFilesHelmDeployNamespace = []string{
+	"manifests/helm-chart/namespace.yaml",
+}
+
+/*
+// TODO: remove if we don't use appsub
 var manifestFilesHelmChartInstallAppSub = []string{
 	"manifests/helm-chart/namespace.yaml",
 	//"manifests/helm-chart/helmrelease-aggregate-clusterrole.yaml",
@@ -122,6 +113,7 @@ var manifestFilesHelmChartInstallAppSub = []string{
 	//FIXME:how to handle the channel?  "manifests/helm-chart/
 }
 
+// TODO: remove if we don't use helmrelease
 var manifestFilesHelmrChartInstallHelmRelease = []string{
 	"manifests/helm-chart/namespace.yaml",
 	"manifests/helm-chart/helmrelease-aggregate-clusterrole.yaml",
@@ -129,10 +121,13 @@ var manifestFilesHelmrChartInstallHelmRelease = []string{
 }
 
 // TODO: we could lookup the stable-0.11 dir and find all files there (in a function)
+// TODO: can probably remove this
 var manifestFilesHelmChartInstallEmbedded = []string{
 	"manifests/helm-chart/namespace.yaml",
 }
+*/
 
+/*
 // List of kinds of objects in the manifestwork - anything in this list will not have
 // the namespace updated before adding to the manifestwork
 var globalKinds = []string{
@@ -142,9 +137,10 @@ var globalKinds = []string{
 }
 
 const crdKind = "CustomResourceDefinition"
+*/
 
 // var helmChartInstallType = "embedded"
-var helmChartInstallType = "embedded-tgz" //FIXME: remove - just for testing different ways
+//var helmChartInstallType = "embedded-tgz" //FIXME: remove - just for testing different ways
 //var helmChartInstallType = "helm-remote-repo" //FIXME: remove - just for testing different ways
 
 // Another agent with registration enabled.
@@ -157,14 +153,23 @@ var _ agent.AgentAddon = &volsyncAgent{}
 func (h *volsyncAgent) Manifests(cluster *clusterv1.ManagedCluster,
 	addon *addonapiv1alpha1.ManagedClusterAddOn,
 ) ([]runtime.Object, error) {
-	/*
-		if !clusterSupportsAddonInstall(cluster) {
-			klog.InfoS("Cluster is not OpenShift, not deploying addon", "addonName",
-				addonName, "cluster", cluster.GetName())
-			return []runtime.Object{}, nil
-		}
-	*/
+	isClusterOpenShift := isOpenShift(cluster)
 
+	// TODO: remove isClusterOpenShift from params - may need to separate getting values for each deploy type
+	values, err := h.getValuesForManifest(addon, cluster, isClusterOpenShift)
+	if err != nil {
+		return nil, err
+	}
+
+	mh := getManifestHelper(embedFS, cluster, addon)
+
+	return mh.loadManifests(values)
+}
+
+/*
+func (h *volsyncAgent) ManifestsOLD(cluster *clusterv1.ManagedCluster,
+	addon *addonapiv1alpha1.ManagedClusterAddOn,
+) ([]runtime.Object, error) {
 	isClusterOpenShift := isOpenShift(cluster)
 
 	objects := []runtime.Object{}
@@ -193,7 +198,7 @@ func (h *volsyncAgent) Manifests(cluster *clusterv1.ManagedCluster,
 		//TODO:
 		helmObjs, err = h.loadManifestsFromHelmChartsDir(helmChartDir, values, cluster)
 	} else {
-		// This is the embeded tgz option - or possibly getting the chart from a remote helm repo
+		// This is the embedded tgz option - or possibly getting the chart from a remote helm repo
 		helmObjs, err = h.loadManifestsFromHelmRepo(values, cluster)
 	}
 
@@ -204,6 +209,7 @@ func (h *volsyncAgent) Manifests(cluster *clusterv1.ManagedCluster,
 
 	return objects, nil
 }
+*/
 
 func (h *volsyncAgent) GetAgentAddonOptions() agent.AgentAddonOptions {
 	return agent.AgentAddonOptions{
@@ -325,57 +331,12 @@ func (h *volsyncAgent) getValuesForManifest(addon *addonapiv1alpha1.ManagedClust
 	return mergedValues, nil
 }
 
+/*
 // func (h *volsyncAgent) loadManifestFromFile(file string, addon *addonapiv1alpha1.ManagedClusterAddOn,
 //
 //	cluster *clusterv1.ManagedCluster, isClusterOpenShift bool, values addonfactory.Values,
 func (h *volsyncAgent) loadManifestFromFile(file string, values addonfactory.Values,
 ) (runtime.Object, error) {
-	/*
-		manifestConfig := struct {
-			OperatorInstallNamespace string
-
-			// OpenShift target cluster parameters - for OLM operator install of VolSync
-			OperatorName           string
-			OperatorGroupSpec      string
-			CatalogSource          string
-			CatalogSourceNamespace string
-			InstallPlanApproval    string
-			Channel                string
-			StartingCSV            string
-
-			// Helm based install parameters for non-OpenShift target clusters
-			HelmSource         string
-			HelmChartName      string
-			HelmPackageVersion string
-		}{
-			OperatorInstallNamespace: getOperatorInstallNamespace(addon, isClusterOpenShift),
-
-			OperatorName:           operatorName,
-			CatalogSource:          getCatalogSource(addon),
-			CatalogSourceNamespace: getCatalogSourceNamespace(addon),
-			InstallPlanApproval:    getInstallPlanApproval(addon),
-			Channel:                getChannel(addon),
-			StartingCSV:            getStartingCSV(addon),
-
-			HelmSource:         getHelmSource(addon),
-			HelmChartName:      getHelmChartName(addon),
-			HelmPackageVersion: getHelmPackageVersion(addon),
-		}
-
-		manifestConfigValues := addonfactory.StructToValues(manifestConfig)
-
-		// Get values from addonDeploymentConfig
-		deploymentConfigValues, err := addonfactory.GetAddOnDeploymentConfigValues(
-			addonframeworkutils.NewAddOnDeploymentConfigGetter(h.addonClient),
-			addonfactory.ToAddOnDeploymentConfigValues,
-		)(cluster, addon)
-		if err != nil {
-			return nil, err
-		}
-
-		// Merge manifestConfig and deploymentConfigValues
-		mergedValues := addonfactory.MergeValues(manifestConfigValues, deploymentConfigValues)
-	*/
 
 	template, err := embedFS.ReadFile(file)
 	if err != nil {
@@ -390,8 +351,10 @@ func (h *volsyncAgent) loadManifestFromFile(file string, values addonfactory.Val
 	}
 	return object, nil
 }
+*/
 
-// TODO: move this to some helm pkg?
+// This was loading a local embedded chart (bare yamls, not a .tgz)
+/*
 func (h *volsyncAgent) loadManifestsFromHelmChartsDir(chartsDir string, values addonfactory.Values,
 	cluster *clusterv1.ManagedCluster,
 ) ([]runtime.Object, error) {
@@ -403,9 +366,11 @@ func (h *volsyncAgent) loadManifestsFromHelmChartsDir(chartsDir string, values a
 		return nil, err
 	}
 
-	return h.renderManifestsFromChart(chart, values, cluster)
+	return helmutils.RenderManifestsFromChart(chart, values, cluster)
 }
+*/
 
+/*
 // This is the prototype way of using either an embedded chart tgz in the image (i.e. local filesystem)
 // or from a remote helm repo
 func (h *volsyncAgent) loadManifestsFromHelmRepo(values addonfactory.Values, cluster *clusterv1.ManagedCluster,
@@ -429,7 +394,9 @@ func (h *volsyncAgent) loadManifestsFromHelmRepo(values addonfactory.Values, clu
 
 	return h.renderManifestsFromChart(chart, values, cluster)
 }
+*/
 
+/*
 //nolint:funlen
 func (h volsyncAgent) renderManifestsFromChart(chart *chart.Chart, values addonfactory.Values,
 	cluster *clusterv1.ManagedCluster,
@@ -532,20 +499,13 @@ func (h volsyncAgent) renderManifestsFromChart(chart *chart.Chart, values addonf
 
 	return helmObjs, nil
 }
+*/
 
+/*
 // returns list of files to put in manifestwork
 // 2nd return arg is a dir containing helmcharts to resolve and put into manifestwork
 func getManifestFileList(_ *addonapiv1alpha1.ManagedClusterAddOn, isClusterOpenShift bool) ([]string, string) {
 	if isClusterOpenShift {
-		/*
-				installNamespace := getInstallNamespace()
-				if installNamespace == globalOperatorInstallNamespace {
-					//TODO: remove this old stuff
-					// Do not need to create an operator group, namespace etc if installing into the global operator ns
-					return manifestFilesAllNamespaces
-				}
-			return manifestFilesAllNamespacesInstallIntoSuggestedNamespace
-		*/
 		return manifestFilesAllNamespaces, ""
 	}
 
@@ -568,6 +528,7 @@ func getManifestFileList(_ *addonapiv1alpha1.ManagedClusterAddOn, isClusterOpenS
 	klog.InfoS("Installing volsync helm chart via embedded repo with tgz and index.html or remote repo")
 	return manifestFilesHelmChartInstallEmbedded, ""
 }
+*/
 
 func getOperatorInstallNamespace(_ *addonapiv1alpha1.ManagedClusterAddOn, isClusterOpenShift bool) string {
 	if isClusterOpenShift {

@@ -7,19 +7,28 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
+	"sort"
 	"sync"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/klog/v2"
 
 	"helm.sh/helm/v3/pkg/chart"
 	"helm.sh/helm/v3/pkg/chart/loader"
+	"helm.sh/helm/v3/pkg/chartutil"
 	"helm.sh/helm/v3/pkg/downloader"
+	"helm.sh/helm/v3/pkg/engine"
 	"helm.sh/helm/v3/pkg/getter"
 	"helm.sh/helm/v3/pkg/repo"
+
+	addonapiv1alpha1 "open-cluster-management.io/api/addon/v1alpha1"
+	clusterv1 "open-cluster-management.io/api/cluster/v1"
 )
 
 const (
-	volsyncChartName        = "volsync"
+	VolsyncChartName        = "volsync"
 	localRepoDir            = "/tmp/helmrepos" // FIXME: mount memory pvc to put files outside of /tmp
 	localRepoCacheDir       = localRepoDir + "/.cache/helm/repository"
 	localRepoConfigFileName = localRepoDir + "/.config/helm/repositories.yaml"
@@ -29,6 +38,16 @@ const (
 	//FIXME: where to embed this file?  If embedded need to save to /tmp/ somewhere?
 	localEmbeddedIndexFileFullPath = embeddedChartsDir + "index.yaml"
 )
+
+const crdKind = "CustomResourceDefinition"
+
+// List of kinds of objects in the manifestwork - anything in this list will not have
+// the namespace updated before adding to the manifestwork
+var globalKinds = []string{
+	"CustomResourceDefinition",
+	"ClusterRole",
+	"ClusterRoleBinding",
+}
 
 //var volsyncRepoURL = "https://tesshuflower.github.io/helm-charts/" //TODO: set default somewhere, allow overriding
 
@@ -300,3 +319,110 @@ func getChartZipFullPath(chartZipFileName string) string {
 	return localRepoCacheDir + "/" + chartZipFileName
 }
 */
+
+//nolint:funlen
+func RenderManifestsFromChart(
+	chart *chart.Chart,
+	namespace string,
+	cluster *clusterv1.ManagedCluster,
+	chartValues map[string]interface{},
+	runtimeDecoder runtime.Decoder,
+) ([]runtime.Object, error) {
+	helmObjs := []runtime.Object{}
+
+	// This only loads crds from the crds/ dir - consider putting them in that format upstream?
+	// OTherwise, maybe we don't need this section getting CRDs, just process them with the rest
+	crds := chart.CRDObjects()
+	for _, crd := range crds {
+		klog.InfoS("#### CRD ####", "crd.Name", crd.Name)
+		crdObj, _, err := runtimeDecoder.Decode(crd.File.Data, nil, nil)
+		if err != nil {
+			klog.Error(err, "Unable to decode CRD", "crd.Name", crd.Name)
+			return nil, err
+		}
+		helmObjs = append(helmObjs, crdObj)
+	}
+
+	helmEngine := engine.Engine{
+		Strict:   true,
+		LintMode: false,
+	}
+	klog.InfoS("Testing helmengine", "helmEngine", helmEngine, "chartValues", chartValues) //TODO: remove
+
+	releaseOptions := chartutil.ReleaseOptions{
+		Name:      chart.Name(),
+		Namespace: namespace,
+	}
+
+	capabilities := &chartutil.Capabilities{
+		KubeVersion: chartutil.KubeVersion{Version: cluster.Status.Version.Kubernetes},
+		//TODO: any other capabilities? -- set openshift scc potentially
+	}
+
+	renderedChartValues, err := chartutil.ToRenderValues(chart, chartValues, releaseOptions, capabilities)
+	if err != nil {
+		klog.Error(err, "Unable to render values for chart", "chart.Name()", chart.Name())
+		return nil, err
+	}
+
+	klog.InfoS("### releaseOptions ###", "releaseOptions", releaseOptions)                  //TODO: remove
+	klog.InfoS("### capabilities ###", "capabilities", capabilities)                        //TODO: remove
+	klog.InfoS("### Rendered Chart values ###", "renderedChartValues", renderedChartValues) //TODO: remove
+
+	templates, err := helmEngine.Render(chart, renderedChartValues)
+	if err != nil {
+		klog.Error(err, "Unable to render chart", "chart.Name()", chart.Name())
+		return nil, err
+	}
+
+	//TODO: can we update the manifest to tell it not to cleanup CRDs when we delete?
+
+	// sort the filenames of the templates so the manifests are ordered consistently
+	keys := make([]string, len(templates))
+	i := 0
+	for k := range templates {
+		keys[i] = k
+		i++
+	}
+	sort.Strings(keys)
+
+	// VolSync CRDs are going to be last (start with volsync.backube_), so go through our sorted keys in reverse order
+	for j := len(keys) - 1; j >= 0; j-- {
+		fileName := keys[j]
+		// skip files that are not .yaml or empty
+		fileExt := filepath.Ext(fileName)
+
+		templateData := templates[fileName]
+		if (fileExt != ".yaml" && fileExt != ".yml") || len(templateData) == 0 || templateData == "\n" {
+			klog.InfoS("Skipping template", "fileName", fileName)
+			continue
+		}
+
+		templateObj, gvk, err := runtimeDecoder.Decode([]byte(templateData), nil, nil)
+		if err != nil {
+			klog.Error(err, "Error decoding rendered template", "fileName", fileName)
+			return nil, err
+		}
+
+		if gvk != nil {
+			if !slices.Contains(globalKinds, gvk.Kind) {
+				// Helm rendering does not set namespace on the templates, it will rely on the kubectl install/apply
+				// to do it (which does not happen since these objects end up directly in our manifestwork).
+				// So set the namespace ourselves for any object with kind not in our globalKinds list
+				templateObj.(metav1.Object).SetNamespace(releaseOptions.Namespace)
+			}
+
+			if gvk.Kind == crdKind {
+				// Add annotation to indicate we do not want the CRD deleted when the manifestwork is deleted
+				// (i.e. when the managedclusteraddon is deleted)
+				crdAnnotations := templateObj.(metav1.Object).GetAnnotations()
+				crdAnnotations[addonapiv1alpha1.DeletionOrphanAnnotationKey] = ""
+				templateObj.(metav1.Object).SetAnnotations(crdAnnotations)
+			}
+		}
+
+		helmObjs = append(helmObjs, templateObj)
+	}
+
+	return helmObjs, nil
+}
