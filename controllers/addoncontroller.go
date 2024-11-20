@@ -7,7 +7,6 @@ import (
 
 	operatorsv1 "github.com/operator-framework/api/pkg/operators/v1"
 	operatorsv1alpha1 "github.com/operator-framework/api/pkg/operators/v1alpha1"
-	appsv1 "k8s.io/api/apps/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -225,7 +224,7 @@ func (h *volsyncAgent) GetAgentAddonOptions() agent.AgentAddonOptions {
 							Resource: "subscriptions",
 							Name:     operatorName,
 							//Namespace: getInstallNamespace(),
-							Namespace: "openshift-operators", //FIXME:
+							Namespace: "openshift-operators", //FIXME: may be able to use '*' after addon-framework updates
 						},
 						ProbeRules: []workapiv1.FeedbackRule{
 							{
@@ -239,19 +238,22 @@ func (h *volsyncAgent) GetAgentAddonOptions() agent.AgentAddonOptions {
 							},
 						},
 					},
-					{
-						ResourceIdentifier: workapiv1.ResourceIdentifier{
-							Group:     appsv1.GroupName,
-							Resource:  "deployments",
-							Name:      "volsync",        //FIXME:
-							Namespace: "volsync-system", //FIXME: How to do this dynamically?
-						},
-						ProbeRules: []workapiv1.FeedbackRule{
-							{
-								Type: workapiv1.WellKnownStatusType,
-							},
-						},
-					},
+					/* TODO: pub back after addon-framework supports ORing probe rules
+					                   and allows setting '*' for namespace
+											{
+												ResourceIdentifier: workapiv1.ResourceIdentifier{
+													Group:     appsv1.GroupName,
+													Resource:  "deployments",
+													Name:      "volsync",
+													Namespace: "volsync-system",
+												},
+												ProbeRules: []workapiv1.FeedbackRule{
+													{
+														Type: workapiv1.WellKnownStatusType,
+													},
+												},
+											},
+					*/
 				},
 				HealthCheck: subHealthCheck,
 			},
