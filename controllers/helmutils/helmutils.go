@@ -199,7 +199,7 @@ func EnsureEmbeddedChart(chartName, version string) (*chart.Chart, error) {
 
 	chartZipFileName := filepath.Base(chartVersion.URLs[0])
 
-	//klog.InfoS("Embedded - resolved chart version", "chartVersion", chartVersion)
+	klog.InfoS("Embedded - resolved chart version", "chartVersion", chartVersion)
 	klog.InfoS("Embedded - resolved chart url", "chartVersion.URLs", chartVersion.URLs)
 	klog.InfoS("Embedded - resolved chart tgz", "chartZipFileName", chartZipFileName)
 
