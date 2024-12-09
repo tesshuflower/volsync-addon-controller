@@ -15,8 +15,6 @@ type manifestHelperHelmDeploy struct {
 }
 
 const (
-	//AnnotationHelmRepoURLOverride = "helm-repo-url"
-	//AnnotationHelmRepoNameOverride = "helm-repo-name"
 	AnnotationHelmUseDevCharts = "helm-chart-dev"
 )
 
@@ -59,28 +57,8 @@ func (mh *manifestHelperHelmDeploy) loadManifestsFromHelmRepo(values addonfactor
 		return nil, err
 	}
 
-	/*
-					  chartName := mh.getHelmChartName()
-						desiredVolSyncVersion := mh.getHelmPackageVersion() //TODO: is this hardcoded for embedded version?
-
-			      var chart *chart.Chart
-			      var err error
-						helmRepoURL, isRemote := mh.isRemoteHelmRepo()
-						if isRemote {
-							// Load the chart from the remote repo (may already be cached locally by helmutils)
-							chart, err = helmutils.EnsureLocalChart(helmRepoURL, chartName, desiredVolSyncVersion, false)
-						} else {
-							// Load the chart from an embedded tgz file on our local filesystem (the default)
-							chart, err = helmutils.EnsureEmbeddedChart(chartName, desiredVolSyncVersion)
-						}
-
-		if err != nil {
-			klog.ErrorS(err, "unable to load or render chart")
-			return nil, err
-		}
-	*/
-
-	return helmutils.RenderManifestsFromChart(chart, installNamespace, mh.cluster, mh.clusterIsOpenShift, values, genericCodec)
+	return helmutils.RenderManifestsFromChart(chart, installNamespace,
+		mh.cluster, mh.clusterIsOpenShift, values, genericCodec)
 }
 
 func (mh *manifestHelperHelmDeploy) getValuesForManifest() (addonfactory.Values, error) {
@@ -121,15 +99,6 @@ func (mh *manifestHelperHelmDeploy) getValuesForManifest() (addonfactory.Values,
 	return mergedValues, nil
 }
 
-// returns returns the desired repoURL and true if remote helm repo should be used
-// if false assume we should use embedded helm charts
-/*
-func (mh *manifestHelperHelmDeploy) isRemoteHelmRepo() (string, bool) {
-	repoUrl, ok := mh.addon.GetAnnotations()[AnnotationHelmRepoURLOverride]
-	return repoUrl, ok
-}
-*/
-
 func (mh *manifestHelperHelmDeploy) getInstallNamespace() string {
 	return DefaultHelmInstallNamespace //TODO: allow overriding?
 }
@@ -146,17 +115,3 @@ func (mh *manifestHelperHelmDeploy) getChartKey() string {
 
 	return chartKey
 }
-
-//func (mh *manifestHelperHelmDeploy) getHelmSource() string {
-//	//TODO: allow overriding with annotations?
-//	return DefaultHelmSource
-//}
-
-//func (mh *manifestHelperHelmDeploy) getHelmChartName() string {
-//	return DefaultHelmChartName
-//}
-
-//func (mh *manifestHelperHelmDeploy) getHelmPackageVersion() string {
-//	//TODO: allow overriding with annotations?
-//	return DefaultHelmPackageVersion
-//}

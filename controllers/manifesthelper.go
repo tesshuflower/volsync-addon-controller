@@ -78,7 +78,8 @@ func (mhc manifestHelperCommon) loadManifestsFromFiles(fileList []string, values
 func shouldDeployVolSyncAsOperator(clusterIsOpenShift bool, addon *addonapiv1alpha1.ManagedClusterAddOn) bool {
 	if clusterIsOpenShift && addon.GetAnnotations()[AnnotationVolSyncAddonDeployTypeOverride] ==
 		AnnotationVolSyncAddonDeployTypeOverrideOLMValue {
-		klog.InfoS("Override - deploying VolSync as OLM operator for cluster", "clusterName", addon.GetNamespace()) //TODO: rem
+		klog.InfoS("Override - deploying VolSync as OLM operator for cluster",
+			"clusterName", addon.GetNamespace())
 		return true
 	}
 
