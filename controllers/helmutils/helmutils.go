@@ -34,7 +34,8 @@ const (
 	localRepoConfigFileName = localRepoDir + "/.config/helm/repositories.yaml"
 
 	//FIXME: don't hardcode this here
-	embeddedChartsDir = "/Users/tflower/DEV/tesshuflower/volsync-addon-controller/controllers/manifests/helm-chart/charts/"
+	//embeddedChartsDir = "/Users/tflower/DEV/tesshuflower/volsync-addon-controller/controllers/manifests/helm-chart/charts/"
+	embeddedChartsDir = "/Users/tflower/DEV/tesshuflower/volsync-addon-controller/helmcharts"
 	//FIXME: where to embed this file?  If embedded need to save to /tmp/ somewhere?
 	localEmbeddedIndexFileFullPath = embeddedChartsDir + "index.yaml"
 )
@@ -51,11 +52,50 @@ var globalKinds = []string{
 
 //var volsyncRepoURL = "https://tesshuflower.github.io/helm-charts/" //TODO: set default somewhere, allow overriding
 
+// New - only load helm charts directly from embedded dirs
+func InitEmbeddedCharts() error {
+	// Embedded Charts dir contains subdirectories - each subdir should contain 1 chart
+	subDirs, err := os.ReadDir(embeddedChartsDir)
+	if err != nil {
+		klog.ErrorS(err, "error loading embedded charts", "embeddedChartsDir", embeddedChartsDir)
+		return err
+	}
+
+	for _, subDir := range subDirs {
+		if subDir.IsDir() {
+			chartsPath := filepath.Join(embeddedChartsDir, subDir.Name(), "volsync")
+			klog.InfoS("Loading charts", "chartsPath", chartsPath)
+
+			chart, err := loader.Load(chartsPath)
+			if err != nil {
+				klog.ErrorS(err, "Error loading chart", "chartsPath", chartsPath)
+				return err
+			}
+			chartKey := subDir.Name()
+			klog.InfoS("Successfully loaded chart", "chartKey", chartKey, "Name", chart.Name(), "AppVersion", chart.AppVersion())
+
+			// Save chart into memory
+			loadedChartsMap.Store(chartKey, chart)
+		}
+	}
+
+	return nil
+}
+
+func GetEmbeddedChart(chartKey string) (*chart.Chart, error) {
+	loadedChart, ok := loadedChartsMap.Load(chartKey)
+	if !ok {
+		return nil, fmt.Errorf("Unable to find chart %s", chartKey)
+	}
+	return loadedChart.(*chart.Chart), nil
+}
+
 // key will be the file name of the chart (e.g. volsync-v0.11.0.tgz)
 // value is the loaded *chart.Chart
 var loadedChartsMap sync.Map
 var localEmbeddedIndexFile *repo.IndexFile // Don't access directly - use loadEmbeddedHelmIndexFile()
 
+// TODO: remove if we don't want to support remote repos
 func loadLocalRepoConfig() (*repo.File, error) {
 	err := os.MkdirAll(filepath.Dir(localRepoConfigFileName), os.ModePerm)
 	if err != nil && !errors.Is(err, fs.ErrExist) {
@@ -324,6 +364,7 @@ func RenderManifestsFromChart(
 	chart *chart.Chart,
 	namespace string,
 	cluster *clusterv1.ManagedCluster,
+	clusterIsOpenShift bool,
 	chartValues map[string]interface{},
 	runtimeDecoder runtime.Decoder,
 ) ([]runtime.Object, error) {
@@ -333,7 +374,6 @@ func RenderManifestsFromChart(
 	// OTherwise, maybe we don't need this section getting CRDs, just process them with the rest
 	crds := chart.CRDObjects()
 	for _, crd := range crds {
-		klog.InfoS("#### CRD ####", "crd.Name", crd.Name)
 		crdObj, _, err := runtimeDecoder.Decode(crd.File.Data, nil, nil)
 		if err != nil {
 			klog.Error(err, "Unable to decode CRD", "crd.Name", crd.Name)
@@ -346,7 +386,6 @@ func RenderManifestsFromChart(
 		Strict:   true,
 		LintMode: false,
 	}
-	klog.InfoS("Testing helmengine", "helmEngine", helmEngine, "chartValues", chartValues) //TODO: remove
 
 	releaseOptions := chartutil.ReleaseOptions{
 		Name:      chart.Name(),
@@ -355,7 +394,12 @@ func RenderManifestsFromChart(
 
 	capabilities := &chartutil.Capabilities{
 		KubeVersion: chartutil.KubeVersion{Version: cluster.Status.Version.Kubernetes},
-		//TODO: any other capabilities? -- set openshift scc potentially
+		APIVersions: chartutil.DefaultVersionSet,
+	}
+
+	if clusterIsOpenShift {
+		// Add openshift scc to apiversions so capabilities in our helm charts that check this will work
+		capabilities.APIVersions = append(capabilities.APIVersions, "security.openshift.io/v1/SecurityContextConstraints")
 	}
 
 	renderedChartValues, err := chartutil.ToRenderValues(chart, chartValues, releaseOptions, capabilities)
@@ -373,8 +417,6 @@ func RenderManifestsFromChart(
 		klog.Error(err, "Unable to render chart", "chart.Name()", chart.Name())
 		return nil, err
 	}
-
-	//TODO: can we update the manifest to tell it not to cleanup CRDs when we delete?
 
 	// sort the filenames of the templates so the manifests are ordered consistently
 	keys := make([]string, len(templates))
