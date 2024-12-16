@@ -1405,7 +1405,7 @@ var _ = Describe("Addon Status Update Tests", func() {
 				})
 
 				Context("When the manifestwork statusFeedback is not available", func() {
-					It("Should set the ManagedClusterAddon status to unknown", func() {
+					It("Should set the ManagedClusterAddon status to unavailable", func() {
 						var statusCondition *metav1.Condition
 						Eventually(func() bool {
 							err := testK8sClient.Get(testCtx, types.NamespacedName{
@@ -1421,8 +1421,8 @@ var _ = Describe("Addon Status Update Tests", func() {
 							return statusCondition != nil
 						}, timeout, interval).Should(BeTrue())
 
-						Expect(statusCondition.Reason).To(Equal("NoProbeResult"))
-						Expect(statusCondition.Status).To(Equal(metav1.ConditionUnknown))
+						Expect(statusCondition.Reason).To(Equal("ProbeUnavailable"))
+						Expect(statusCondition.Status).To(Equal(metav1.ConditionFalse))
 					})
 				})
 
@@ -1454,7 +1454,7 @@ var _ = Describe("Addon Status Update Tests", func() {
 						}, timeout, interval).Should(Succeed())
 					})
 
-					It("Should set the ManagedClusterAddon status to unknown", func() {
+					It("Should set the ManagedClusterAddon status to unavailable", func() {
 						var statusCondition *metav1.Condition
 						Eventually(func() bool {
 							err := testK8sClient.Get(testCtx, types.NamespacedName{
@@ -1467,6 +1467,8 @@ var _ = Describe("Addon Status Update Tests", func() {
 
 							statusCondition = meta.FindStatusCondition(mcAddon.Status.Conditions,
 								addonv1alpha1.ManagedClusterAddOnConditionAvailable)
+
+							logger.Info("statusCondition", "statusCondition", &statusCondition)
 							return statusCondition.Reason == "ProbeUnavailable"
 						}, timeout, interval).Should(BeTrue())
 
@@ -1529,39 +1531,6 @@ var _ = Describe("Addon Status Update Tests", func() {
 					})
 				})
 			})
-
-			/* TODO: put back after we fix the status - will need to check for successful status
-			               now that we support OpenShift clusters
-						Context("When the managed cluster is not an OpenShift cluster", func() {
-							BeforeEach(func() {
-								// remove labels from the managedcluster resource before it's created
-								// to simulate a "non-OpenShift" cluster
-								testManagedCluster.Labels = map[string]string{}
-							})
-
-							It("ManagedClusterAddOn status should not be successful", func() {
-								var statusCondition *metav1.Condition
-								Eventually(func() *metav1.Condition {
-									err := testK8sClient.Get(testCtx, types.NamespacedName{
-										Name:      "volsync",
-										Namespace: testManagedClusterNamespace.GetName(),
-									}, mcAddon)
-									if err != nil {
-										return nil
-									}
-
-									logger.Info("### status should not be successful", "mcAddon.Status.Conditions", mcAddon.Status.Conditions)
-									statusCondition = meta.FindStatusCondition(mcAddon.Status.Conditions,
-										addonv1alpha1.ManagedClusterAddOnConditionAvailable)
-									return statusCondition
-									// addon-framework sets condition to Unknown
-								}, timeout, interval).Should(Not(BeNil()))
-
-								Expect(statusCondition.Reason).To(Equal("WorkNotFound")) // We didn't deploy any manifests
-								Expect(statusCondition.Status).To(Equal(metav1.ConditionUnknown))
-							})
-						})
-			*/
 		})
 	})
 })
