@@ -1467,7 +1467,9 @@ var _ = Describe("Addon Status Update Tests", func() {
 
 							statusCondition = meta.FindStatusCondition(mcAddon.Status.Conditions,
 								addonv1alpha1.ManagedClusterAddOnConditionAvailable)
-
+							if statusCondition == nil {
+								return false
+							}
 							logger.Info("statusCondition", "statusCondition", &statusCondition)
 							return statusCondition.Reason == "ProbeUnavailable"
 						}, timeout, interval).Should(BeTrue())
@@ -1475,7 +1477,7 @@ var _ = Describe("Addon Status Update Tests", func() {
 						Expect(statusCondition.Reason).To(Equal("ProbeUnavailable"))
 						Expect(statusCondition.Status).To(Equal(metav1.ConditionFalse))
 						Expect(statusCondition.Message).To(ContainSubstring("Probe addon unavailable with err"))
-						Expect(statusCondition.Message).To(ContainSubstring("unexpected installedCSV value"))
+						Expect(statusCondition.Message).To(ContainSubstring("addon subscription not found"))
 					})
 				})
 
@@ -1520,6 +1522,9 @@ var _ = Describe("Addon Status Update Tests", func() {
 
 							statusCondition = meta.FindStatusCondition(mcAddon.Status.Conditions,
 								addonv1alpha1.ManagedClusterAddOnConditionAvailable)
+							if statusCondition == nil {
+								return false
+							}
 							return statusCondition.Reason == "ProbeAvailable"
 						}, timeout, interval).Should(BeTrue())
 
@@ -1565,89 +1570,3 @@ func manifestWorkResourceStatusWithSubscriptionInstalledCSVFeedBack(
 		},
 	}
 }
-
-/*
-func createAddonDeploymentConfig(nodePlacement *addonv1alpha1.NodePlacement) *addonv1alpha1.AddOnDeploymentConfig {
-	// Create a ns to host the addondeploymentconfig
-	// These can be accessed globally, so could be in the mgd cluster namespace
-	// but, creating a new ns for each one to keep the tests simple
-	tempNamespace := &corev1.Namespace{
-		ObjectMeta: metav1.ObjectMeta{
-			GenerateName: "test-temp-",
-		},
-	}
-	Expect(testK8sClient.Create(testCtx, tempNamespace)).To(Succeed())
-
-	// Create an addonDeploymentConfig
-	customAddonDeploymentConfig := &addonv1alpha1.AddOnDeploymentConfig{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-deployment-config-1",
-			Namespace: tempNamespace.GetName(),
-		},
-		Spec: addonv1alpha1.AddOnDeploymentConfigSpec{
-			NodePlacement: nodePlacement,
-		},
-	}
-	Expect(testK8sClient.Create(testCtx, customAddonDeploymentConfig)).To(Succeed())
-
-	return customAddonDeploymentConfig
-}
-*/
-
-/*
-//nolint:unparam
-func cleanupAddonDeploymentConfig(
-	addonDeploymentConfig *addonv1alpha1.AddOnDeploymentConfig, cleanupNamespace bool,
-) {
-	// Assumes the addondeploymentconfig has its own namespace - cleans up the addondeploymentconfig
-	// and optionally the namespace as well
-	nsName := addonDeploymentConfig.GetNamespace()
-	Expect(testK8sClient.Delete(testCtx, addonDeploymentConfig)).To(Succeed())
-	if cleanupNamespace {
-		ns := &corev1.Namespace{}
-		Expect(testK8sClient.Get(testCtx, types.NamespacedName{Name: nsName}, ns)).To(Succeed())
-		Expect(testK8sClient.Delete(testCtx, ns)).To(Succeed())
-	}
-}
-*/
-
-/*
-func addCMAOwnership(cma *addonv1alpha1.ClusterManagementAddOn,
-	managedClusterAddOn *addonv1alpha1.ManagedClusterAddOn,
-) error {
-	if err := ctrlutil.SetOwnerReference(cma, managedClusterAddOn, testK8sClient.Scheme()); err != nil {
-		return err
-	}
-
-	return testK8sClient.Update(testCtx, managedClusterAddOn)
-}
-*/
-
-/*
-func addDeploymentConfigStatusEntry(managedClusterAddOn *addonv1alpha1.ManagedClusterAddOn,
-	addonDeploymentConfig *addonv1alpha1.AddOnDeploymentConfig,
-) error {
-	managedClusterAddOn.Status.ConfigReferences = []addonv1alpha1.ConfigReference{
-		{
-			// ConfigReferent is deprecated, but api complains if ConfigReferent.Name is not specified
-			ConfigReferent: addonv1alpha1.ConfigReferent{
-				Name:      addonDeploymentConfig.GetName(),
-				Namespace: addonDeploymentConfig.GetNamespace(),
-			},
-			ConfigGroupResource: addonv1alpha1.ConfigGroupResource{
-				Group:    addonframeworkutils.AddOnDeploymentConfigGVR.Group,
-				Resource: addonframeworkutils.AddOnDeploymentConfigGVR.Resource,
-			},
-			DesiredConfig: &addonv1alpha1.ConfigSpecHash{
-				ConfigReferent: addonv1alpha1.ConfigReferent{
-					Name:      addonDeploymentConfig.GetName(),
-					Namespace: addonDeploymentConfig.GetNamespace(),
-				},
-				SpecHash: "fakehashfortest",
-			},
-		},
-	}
-
-	return testK8sClient.Status().Update(testCtx, managedClusterAddOn)
-}
-*/

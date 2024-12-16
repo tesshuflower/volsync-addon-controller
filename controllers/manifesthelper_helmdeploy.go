@@ -48,9 +48,7 @@ func (mh *manifestHelperHelmDeploy) loadManifests() ([]runtime.Object, error) {
 
 func (mh *manifestHelperHelmDeploy) subHealthCheck(fieldResults []agent.FieldResult) error {
 	if len(fieldResults) == 0 {
-		noResultsErr := fmt.Errorf("no fieldResults found in health checker")
-		klog.ErrorS(noResultsErr, "No results")
-		return noResultsErr
+		return fmt.Errorf("no fieldResults found in health checker")
 	}
 	for _, fieldResult := range fieldResults {
 		if len(fieldResult.FeedbackResult.Values) == 0 {
@@ -70,7 +68,7 @@ func (mh *manifestHelperHelmDeploy) subHealthCheck(fieldResults []agent.FieldRes
 			}
 
 			if readyReplicas == -1 {
-				return fmt.Errorf("readyReplica is not probed")
+				return fmt.Errorf("readyReplicas is not probed")
 			}
 			if desiredNumberReplicas == -1 {
 				return fmt.Errorf("desiredNumberReplicas is not probed")
@@ -84,18 +82,14 @@ func (mh *manifestHelperHelmDeploy) subHealthCheck(fieldResults []agent.FieldRes
 				return nil
 			}
 
-			numReplicasErr := fmt.Errorf("desiredNumberReplicas is %d but readyReplica is %d for %s %s/%s",
+			return fmt.Errorf("desiredNumberReplicas is %d but readyReplica is %d for %s %s/%s",
 				desiredNumberReplicas, readyReplicas,
 				fieldResult.ResourceIdentifier.Resource,
 				fieldResult.ResourceIdentifier.Namespace,
 				fieldResult.ResourceIdentifier.Name)
-			klog.ErrorS(numReplicasErr, "volsync deployment not ready")
-			return numReplicasErr
 		}
 	}
-	notReadyErr := fmt.Errorf("volsync addon is not ready")
-	klog.ErrorS(notReadyErr, "volsync deployment not ready")
-	return notReadyErr
+	return fmt.Errorf("volsync addon is not ready")
 }
 
 // Now need to load and render the helm charts into objects
